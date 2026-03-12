@@ -95,6 +95,9 @@ type NetworkDriver struct {
 	// Cache the rdma shared mode state
 	rdmaSharedMode bool
 	podConfigStore *PodConfigStore
+	// SwiftV2-specific pod config store for NRI plugin lookups.
+	// Populated during PrepareResourceClaims, read during NRI RunPodSandbox.
+	swiftV2Store *SwiftV2PodConfigStore
 }
 
 type Option func(*NetworkDriver)
@@ -116,6 +119,7 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 		kubeClient:     kubeClient,
 		rdmaSharedMode: rdmaNetnsMode == apis.RdmaNetnsModeShared,
 		podConfigStore: NewPodConfigStore(),
+		swiftV2Store:   NewSwiftV2PodConfigStore(),
 	}
 
 	for _, o := range opts {

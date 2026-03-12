@@ -1,0 +1,484 @@
+/*
+Copyright The Kubernetes Authors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package driver
+
+import (
+	"errors"
+	"fmt"
+	"net"
+	"syscall"
+
+	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netns"
+	"sigs.k8s.io/dranet/internal/nlwrap"
+
+	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/klog/v2"
+)
+
+const (
+	// swiftV2VirtualGW is the Azure virtual gateway IP used by SwiftV2 for
+	// delegated NIC routing. This matches the CNS middleware constant.
+	swiftV2VirtualGW = "169.254.2.1"
+
+	// swiftV2DelegatedIfName is the interface name assigned to delegated NICs
+	// inside the pod namespace (both shared ipvlan children and dedicated NICs
+	// when NRI plumbs them).
+	swiftV2DelegatedIfName = "eth1"
+)
+
+// findLinkByMAC finds a network interface on the host by its MAC address.
+// Returns the link and nil error on success, or nil and an error if not found.
+func findLinkByMAC(mac string) (netlink.Link, error) {
+	targetMAC, err := net.ParseMAC(mac)
+	if err != nil {
+		return nil, fmt.Errorf("invalid MAC address %s: %w", mac, err)
+	}
+
+	links, err := nlwrap.LinkList()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list host links: %w", err)
+	}
+
+	for _, link := range links {
+		if link.Attrs().HardwareAddr.String() == targetMAC.String() {
+			return link, nil
+		}
+	}
+	return nil, fmt.Errorf("NIC with MAC %s not found on host", mac)
+}
+
+// nsAttachIPVlanL3 creates an ipvlan L3 sub-interface off the shared parent NIC,
+// adds a host-side /32 route for host-to-pod traffic, moves the sub-interface
+// into the pod network namespace, and configures IP + routes inside the pod.
+//
+// The host-side /32 route is needed because host processes (CNS, kubelet health
+// probes) need the kernel routing table to reach pod IPs. Wire-to-pod traffic
+// is handled internally by the ipvlan L3 driver and does not require host routes.
+func nsAttachIPVlanL3(cfg *NICConfig, containerNsPath string) (*resourceapi.NetworkDeviceData, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("NICConfig is nil")
+	}
+
+	// --- Host namespace operations ---
+
+	// Find parent NIC by MAC address, matching CNI behavior.
+	parent, err := findLinkByMAC(cfg.MAC)
+	if err != nil {
+		return nil, fmt.Errorf("parent NIC (MAC %s) not found: %w", cfg.MAC, err)
+	}
+
+	// Create ipvlan L3 sub-interface off physical NIC.
+	// Name uses first 8 chars of PodUID to keep it unique and short.
+	ipvlName := fmt.Sprintf("ipvl-%s", truncateUID(cfg.PodUID))
+	ipvl := &netlink.IPVlan{
+		LinkAttrs: netlink.LinkAttrs{
+			Name:        ipvlName,
+			ParentIndex: parent.Attrs().Index,
+		},
+		Mode: netlink.IPVLAN_MODE_L3,
+	}
+	if err := netlink.LinkAdd(ipvl); err != nil {
+		return nil, fmt.Errorf("failed to create ipvlan L3 interface %s on parent (MAC %s): %w", ipvlName, cfg.MAC, err)
+	}
+
+	// Add host-side /32 route for host-to-pod traffic.
+	// Uses RouteReplace on EEXIST for retry idempotency (stale route from failed attempt).
+	hostRoute := &netlink.Route{
+		Dst:       parseIP32(cfg.PodIP),
+		LinkIndex: parent.Attrs().Index,
+		Scope:     netlink.SCOPE_LINK,
+	}
+	if err := netlink.RouteAdd(hostRoute); err != nil {
+		if errors.Is(err, syscall.EEXIST) {
+			if err := netlink.RouteReplace(hostRoute); err != nil {
+				return nil, fmt.Errorf("failed to replace host route for %s: %w", cfg.PodIP, err)
+			}
+		} else {
+			return nil, fmt.Errorf("failed to add host route for %s: %w", cfg.PodIP, err)
+		}
+	}
+
+	// Move sub-interface into pod network namespace.
+	containerNs, err := netns.GetFromPath(containerNsPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get netns %s: %w", containerNsPath, err)
+	}
+	defer containerNs.Close()
+
+	if err := netlink.LinkSetNsFd(ipvl, int(containerNs)); err != nil {
+		return nil, fmt.Errorf("failed to move ipvlan %s to netns %s: %w", ipvlName, containerNsPath, err)
+	}
+
+	// --- Pod namespace operations ---
+
+	nhNs, err := nlwrap.NewHandleAt(containerNs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get netlink handle in netns %s: %w", containerNsPath, err)
+	}
+	defer nhNs.Close()
+
+	nsLink, err := nhNs.LinkByName(ipvlName)
+	if err != nil {
+		return nil, fmt.Errorf("ipvlan interface %s not found in netns: %w", ipvlName, err)
+	}
+
+	// Rename to eth1 inside the pod namespace.
+	if err := netlink.LinkSetName(nsLink, swiftV2DelegatedIfName); err != nil {
+		return nil, fmt.Errorf("failed to rename %s to %s: %w", ipvlName, swiftV2DelegatedIfName, err)
+	}
+
+	nsLink, err = nhNs.LinkByName(swiftV2DelegatedIfName)
+	if err != nil {
+		return nil, fmt.Errorf("renamed interface %s not found in netns: %w", swiftV2DelegatedIfName, err)
+	}
+
+	// Assign IP with /32 mask (point-to-point).
+	podIP := net.ParseIP(cfg.PodIP)
+	if podIP == nil {
+		return nil, fmt.Errorf("invalid pod IP: %s", cfg.PodIP)
+	}
+	if err := nhNs.AddrAdd(nsLink, &netlink.Addr{
+		IPNet: &net.IPNet{IP: podIP, Mask: net.CIDRMask(32, 32)},
+	}); err != nil && !errors.Is(err, syscall.EEXIST) {
+		return nil, fmt.Errorf("failed to add IP %s/32: %w", cfg.PodIP, err)
+	}
+
+	// Bring interface up.
+	if err := nhNs.LinkSetUp(nsLink); err != nil {
+		return nil, fmt.Errorf("failed to bring up %s: %w", swiftV2DelegatedIfName, err)
+	}
+
+	// Add gateway /32 scope link route (gateway reachable directly on link).
+	gwIP := net.ParseIP(cfg.GatewayIP)
+	if gwIP == nil {
+		return nil, fmt.Errorf("invalid gateway IP: %s", cfg.GatewayIP)
+	}
+	gwRoute := netlink.Route{
+		Dst:       &net.IPNet{IP: gwIP, Mask: net.CIDRMask(32, 32)},
+		LinkIndex: nsLink.Attrs().Index,
+		Scope:     netlink.SCOPE_LINK,
+	}
+	if err := nhNs.RouteAdd(&gwRoute); err != nil && !errors.Is(err, syscall.EEXIST) {
+		return nil, fmt.Errorf("failed to add gateway route %s/32: %w", cfg.GatewayIP, err)
+	}
+
+	// Add default route via gateway.
+	_, defaultDst, _ := net.ParseCIDR("0.0.0.0/0")
+	defaultRoute := netlink.Route{
+		Dst:       defaultDst,
+		Gw:        gwIP,
+		LinkIndex: nsLink.Attrs().Index,
+	}
+	if err := nhNs.RouteAdd(&defaultRoute); err != nil && !errors.Is(err, syscall.EEXIST) {
+		return nil, fmt.Errorf("failed to add default route via %s: %w", cfg.GatewayIP, err)
+	}
+
+	return &resourceapi.NetworkDeviceData{
+		InterfaceName:   swiftV2DelegatedIfName,
+		HardwareAddress: parent.Attrs().HardwareAddr.String(),
+		IPs:             []string{fmt.Sprintf("%s/32", cfg.PodIP)},
+	}, nil
+}
+
+// cleanupIPVlanL3 removes the host-side /32 route for a shared NIC pod.
+// The ipvlan sub-interface is automatically destroyed when the pod's network
+// namespace is deleted by the kernel.
+// This is best-effort — errors are logged but not returned.
+func cleanupIPVlanL3(cfg *NICConfig) {
+	if cfg == nil {
+		return
+	}
+
+	parent, err := findLinkByMAC(cfg.MAC)
+	if err != nil {
+		klog.Warningf("SwiftV2 cleanup: parent NIC (MAC %s) not found: %v", cfg.MAC, err)
+		return
+	}
+
+	route := &netlink.Route{
+		Dst:       parseIP32(cfg.PodIP),
+		LinkIndex: parent.Attrs().Index,
+		Scope:     netlink.SCOPE_LINK,
+	}
+	if err := netlink.RouteDel(route); err != nil {
+		klog.Warningf("SwiftV2 cleanup: failed to remove host route for %s: %v", cfg.PodIP, err)
+	}
+}
+
+// nicExistsInNetns checks whether a NIC with the given MAC address already
+// exists in the specified network namespace. Used for idempotent dedicated NIC
+// plumbing — if CNI has already moved the NIC in, NRI skips entirely.
+func nicExistsInNetns(containerNsPath string, mac string) bool {
+	containerNs, err := netns.GetFromPath(containerNsPath)
+	if err != nil {
+		return false
+	}
+	defer containerNs.Close()
+
+	nhNs, err := nlwrap.NewHandleAt(containerNs)
+	if err != nil {
+		return false
+	}
+	defer nhNs.Close()
+
+	links, err := nhNs.LinkList()
+	if err != nil {
+		return false
+	}
+
+	targetMAC, err := net.ParseMAC(mac)
+	if err != nil {
+		return false
+	}
+
+	for _, link := range links {
+		if link.Attrs().HardwareAddr.String() == targetMAC.String() {
+			return true
+		}
+	}
+	return false
+}
+
+// nsAttachDedicatedNIC moves a dedicated physical NIC (identified by MAC address)
+// into the pod network namespace, assigns IP addresses and routes.
+// This matches the CNI SecondaryEndpointClient behavior:
+//   - Lookup NIC by MAC (not name)
+//   - Move NIC into pod netns (no rename — keeps original name)
+//   - Bring link up
+//   - Assign IP addresses
+//   - Add routes: virtual GW /32 scope link + default via virtual GW
+//   - Issue DHCP discover for DNS wireserver mapping (background goroutine)
+func nsAttachDedicatedNIC(cfg *NICConfig, containerNsPath string, addresses []string) (*resourceapi.NetworkDeviceData, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("NICConfig is nil")
+	}
+
+	// Find NIC by MAC address on the host, matching CNI's GetNetworkInterfaceByMac.
+	hostLink, err := findLinkByMAC(cfg.MAC)
+	if err != nil {
+		// NIC not on host — it may have been moved into the pod netns by CNI
+		// between our nicExistsInNetns check and now (TOCTOU race). Verify
+		// it's in the pod netns before reporting an error.
+		if nicExistsInNetns(containerNsPath, cfg.MAC) {
+			klog.V(2).Infof("SwiftV2 dedicated NIC: MAC %s not on host but already in pod netns (CNI race), skipping", cfg.MAC)
+			return &resourceapi.NetworkDeviceData{
+				HardwareAddress: cfg.MAC,
+			}, nil
+		}
+		return nil, fmt.Errorf("dedicated NIC with MAC %s not found on host or in pod netns", cfg.MAC)
+	}
+
+	targetMAC, _ := net.ParseMAC(cfg.MAC) // already validated by findLinkByMAC
+
+	ifName := hostLink.Attrs().Name
+
+	// Move NIC into pod namespace.
+	containerNs, err := netns.GetFromPath(containerNsPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get netns %s: %w", containerNsPath, err)
+	}
+	defer containerNs.Close()
+
+	if err := netlink.LinkSetNsFd(hostLink, int(containerNs)); err != nil {
+		return nil, fmt.Errorf("failed to move NIC %s to netns %s: %w", ifName, containerNsPath, err)
+	}
+
+	// --- Pod namespace operations ---
+
+	nhNs, err := nlwrap.NewHandleAt(containerNs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get netlink handle in netns %s: %w", containerNsPath, err)
+	}
+	defer nhNs.Close()
+
+	nsLink, err := nhNs.LinkByName(ifName)
+	if err != nil {
+		return nil, fmt.Errorf("NIC %s not found in netns after move: %w", ifName, err)
+	}
+
+	// Bring link up (matches CNI SetupContainerInterfaces).
+	if err := nhNs.LinkSetUp(nsLink); err != nil {
+		return nil, fmt.Errorf("failed to bring up %s: %w", ifName, err)
+	}
+
+	// Assign IP addresses.
+	networkData := &resourceapi.NetworkDeviceData{
+		InterfaceName:   ifName,
+		HardwareAddress: targetMAC.String(),
+	}
+
+	for _, addr := range addresses {
+		ip, ipNet, err := net.ParseCIDR(addr)
+		if err != nil {
+			klog.Warningf("SwiftV2 dedicated NIC: invalid address %s: %v", addr, err)
+			continue
+		}
+		if err := nhNs.AddrAdd(nsLink, &netlink.Addr{
+			IPNet: &net.IPNet{IP: ip, Mask: ipNet.Mask},
+		}); err != nil && !errors.Is(err, syscall.EEXIST) {
+			return nil, fmt.Errorf("failed to add address %s to %s: %w", addr, ifName, err)
+		}
+		networkData.IPs = append(networkData.IPs, addr)
+	}
+
+	// Delete kernel-added subnet routes (matches CNI ConfigureContainerInterfacesAndRoutes).
+	// When assigning an IP, the kernel auto-adds a subnet route that we need to remove.
+	for _, addr := range addresses {
+		_, ipNet, err := net.ParseCIDR(addr)
+		if err != nil {
+			continue
+		}
+		subnetRoute := netlink.Route{
+			Dst:       ipNet,
+			LinkIndex: nsLink.Attrs().Index,
+			Scope:     netlink.SCOPE_LINK,
+			Protocol:  syscall.RTPROT_KERNEL,
+		}
+		// Best-effort removal — may not exist if prefix is /32.
+		_ = nhNs.RouteDel(&subnetRoute)
+	}
+
+	// Add virtual gateway /32 scope link route.
+	gwIP := net.ParseIP(cfg.GatewayIP)
+	if gwIP == nil {
+		return nil, fmt.Errorf("invalid gateway IP: %s", cfg.GatewayIP)
+	}
+	gwRoute := netlink.Route{
+		Dst:       &net.IPNet{IP: gwIP, Mask: net.CIDRMask(32, 32)},
+		LinkIndex: nsLink.Attrs().Index,
+		Scope:     netlink.SCOPE_LINK,
+	}
+	if err := nhNs.RouteAdd(&gwRoute); err != nil && !errors.Is(err, syscall.EEXIST) {
+		return nil, fmt.Errorf("failed to add gateway route %s/32: %w", cfg.GatewayIP, err)
+	}
+
+	// Add default route via virtual gateway.
+	_, defaultDst, _ := net.ParseCIDR("0.0.0.0/0")
+	defaultRoute := netlink.Route{
+		Dst:       defaultDst,
+		Gw:        gwIP,
+		LinkIndex: nsLink.Attrs().Index,
+	}
+	if err := nhNs.RouteAdd(&defaultRoute); err != nil && !errors.Is(err, syscall.EEXIST) {
+		return nil, fmt.Errorf("failed to add default route via %s: %w", cfg.GatewayIP, err)
+	}
+
+	// Issue DHCP discover in background to create DNS mapping in host via wireserver.
+	// This matches the CNI SecondaryEndpointClient behavior. Run as goroutine because
+	// the NRI plugin has a 2-second default timeout and DHCP can take ~3 seconds.
+	go func() {
+		if err := issueDHCPDiscover(containerNsPath, ifName, targetMAC); err != nil {
+			klog.Warningf("SwiftV2 dedicated NIC: DHCP discover failed for %s (MAC %s): %v — DNS via wireserver may not work", ifName, cfg.MAC, err)
+		}
+	}()
+
+	return networkData, nil
+}
+
+// cleanupDedicatedNIC moves a dedicated NIC back from the pod namespace to the
+// host namespace. This matches the CNI SecondaryEndpointClient.DeleteEndpoints
+// behavior. Best-effort — if the netns is already gone, the kernel has already
+// returned the NIC to the host.
+func cleanupDedicatedNIC(containerNsPath string, mac string) {
+	containerNs, err := netns.GetFromPath(containerNsPath)
+	if err != nil {
+		// Namespace likely already deleted — NIC returned to host by kernel.
+		klog.V(2).Infof("SwiftV2 cleanup: netns %s not found (NIC returned by kernel): %v", containerNsPath, err)
+		return
+	}
+	defer containerNs.Close()
+
+	nhNs, err := nlwrap.NewHandleAt(containerNs)
+	if err != nil {
+		klog.Warningf("SwiftV2 cleanup: failed to get netlink handle in netns: %v", err)
+		return
+	}
+	defer nhNs.Close()
+
+	// Find the NIC by MAC in the pod namespace.
+	links, err := nhNs.LinkList()
+	if err != nil {
+		klog.Warningf("SwiftV2 cleanup: failed to list links in netns: %v", err)
+		return
+	}
+
+	targetMAC, err := net.ParseMAC(mac)
+	if err != nil {
+		klog.Warningf("SwiftV2 cleanup: invalid MAC %s: %v", mac, err)
+		return
+	}
+
+	var nicLink netlink.Link
+	for _, link := range links {
+		if link.Attrs().HardwareAddr.String() == targetMAC.String() {
+			nicLink = link
+			break
+		}
+	}
+	if nicLink == nil {
+		klog.V(2).Infof("SwiftV2 cleanup: NIC with MAC %s not found in netns (already returned)", mac)
+		return
+	}
+
+	// Move NIC back to host namespace.
+	rootNs, err := netns.Get()
+	if err != nil {
+		klog.Warningf("SwiftV2 cleanup: failed to get root netns: %v", err)
+		return
+	}
+	defer rootNs.Close()
+
+	if err := netlink.LinkSetNsFd(nicLink, int(rootNs)); err != nil {
+		klog.Warningf("SwiftV2 cleanup: failed to move NIC (MAC %s) back to host: %v", mac, err)
+		return
+	}
+
+	klog.V(2).Infof("SwiftV2 cleanup: returned dedicated NIC (MAC %s) to host namespace", mac)
+}
+
+// issueDHCPDiscover sends a DHCP discover packet on the specified interface
+// inside the given network namespace. This creates a mapping in the host for
+// DNS resolution via wireserver, matching the CNI SecondaryEndpointClient behavior.
+//
+// TODO: implement DHCP discover. For now this is a stub that logs the intent.
+// The real implementation needs a DHCP client library (e.g., github.com/insomniacslk/dhcp).
+func issueDHCPDiscover(containerNsPath string, ifName string, mac net.HardwareAddr) error {
+	klog.V(2).Infof("SwiftV2: would issue DHCP discover on %s (MAC %s) in netns %s for DNS wireserver mapping",
+		ifName, mac.String(), containerNsPath)
+	// TODO: implement actual DHCP discover using a DHCP client library.
+	// The CNI uses a 3-second timeout for this operation.
+	return nil
+}
+
+// parseIP32 parses an IP string and returns a /32 IPNet.
+func parseIP32(ipStr string) *net.IPNet {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return nil
+	}
+	return &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)}
+}
+
+// truncateUID returns the first 8 characters of a UID string for use in
+// interface naming. If the UID is shorter than 8 characters, returns the whole string.
+func truncateUID(uid string) string {
+	if len(uid) > 8 {
+		return uid[:8]
+	}
+	return uid
+}

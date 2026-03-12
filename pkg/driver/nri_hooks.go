@@ -112,18 +112,40 @@ func (np *NetworkDriver) RunPodSandbox(ctx context.Context, pod *api.PodSandbox)
 		nriPluginRequestsLatencySeconds.WithLabelValues(methodRunPodSandbox, status).Observe(time.Since(start).Seconds())
 
 	}()
-	// get the devices associated to this Pod
-	podConfig, ok := np.podConfigStore.GetPodConfigs(types.UID(pod.GetUid()))
-	if !ok {
+
+	podUID := types.UID(pod.GetUid())
+
+	// Check upstream DRA config store first.
+	podConfig, hasDRAConfig := np.podConfigStore.GetPodConfigs(podUID)
+
+	// Check SwiftV2 config store.
+	swiftV2Configs := np.swiftV2Store.Get(podUID)
+
+	if !hasDRAConfig && swiftV2Configs == nil {
 		return nil
 	}
-	err := np.runPodSandbox(ctx, pod, podConfig)
-	if err != nil {
-		status = statusFailed
-	} else {
+
+	// Process upstream DRA devices if present.
+	if hasDRAConfig {
+		err := np.runPodSandbox(ctx, pod, podConfig)
+		if err != nil {
+			status = statusFailed
+			return err
+		}
 		status = statusSuccess
 	}
-	return err
+
+	// Process SwiftV2 devices if present.
+	if swiftV2Configs != nil {
+		err := np.runPodSandboxSwiftV2(pod, swiftV2Configs)
+		if err != nil {
+			status = statusFailed
+			return err
+		}
+		status = statusSuccess
+	}
+
+	return nil
 }
 func (np *NetworkDriver) runPodSandbox(_ context.Context, pod *api.PodSandbox, podConfig map[string]PodConfig) error {
 	// get the pod network namespace
@@ -279,18 +301,36 @@ func (np *NetworkDriver) StopPodSandbox(ctx context.Context, pod *api.PodSandbox
 		klog.V(2).Infof("StopPodSandbox Pod %s/%s UID %s took %v", pod.Namespace, pod.Name, pod.Uid, time.Since(start))
 		nriPluginRequestsLatencySeconds.WithLabelValues(methodStopPodSandbox, status).Observe(time.Since(start).Seconds())
 	}()
-	// get the devices associated to this Pod
-	podConfig, ok := np.podConfigStore.GetPodConfigs(types.UID(pod.GetUid()))
-	if !ok {
+
+	podUID := types.UID(pod.GetUid())
+
+	// Check upstream DRA config store.
+	podConfig, hasDRAConfig := np.podConfigStore.GetPodConfigs(podUID)
+
+	// Check SwiftV2 config store.
+	swiftV2Configs := np.swiftV2Store.Get(podUID)
+
+	if !hasDRAConfig && swiftV2Configs == nil {
 		return nil
 	}
-	err := np.stopPodSandbox(ctx, pod, podConfig)
-	if err != nil {
-		status = statusFailed
-	} else {
+
+	// Process upstream DRA cleanup if present.
+	if hasDRAConfig {
+		err := np.stopPodSandbox(ctx, pod, podConfig)
+		if err != nil {
+			status = statusFailed
+		} else {
+			status = statusSuccess
+		}
+	}
+
+	// Process SwiftV2 cleanup if present.
+	if swiftV2Configs != nil {
+		np.stopPodSandboxSwiftV2(pod, swiftV2Configs)
 		status = statusSuccess
 	}
-	return err
+
+	return nil
 }
 
 func (np *NetworkDriver) stopPodSandbox(_ context.Context, pod *api.PodSandbox, podConfig map[string]PodConfig) error {

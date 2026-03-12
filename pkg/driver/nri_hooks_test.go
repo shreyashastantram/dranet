@@ -30,6 +30,7 @@ import (
 func TestCreateContainerNoDuplicateDevices(t *testing.T) {
 	np := &NetworkDriver{
 		podConfigStore: NewPodConfigStore(),
+		swiftV2Store:   NewSwiftV2PodConfigStore(),
 	}
 
 	podUID := types.UID("test-pod")
@@ -84,6 +85,7 @@ func TestCreateContainerMetrics(t *testing.T) {
 			nriPluginRequestsLatencySeconds.Reset()
 			np := &NetworkDriver{
 				podConfigStore: tc.podConfigStore,
+				swiftV2Store:   NewSwiftV2PodConfigStore(),
 				netdb:          inventory.New(),
 			}
 
@@ -183,6 +185,7 @@ func TestRunPodSandboxMetrics(t *testing.T) {
 			nriPluginRequestsLatencySeconds.Reset()
 			np := &NetworkDriver{
 				podConfigStore: tc.podConfigStore,
+				swiftV2Store:   NewSwiftV2PodConfigStore(),
 				netdb:          inventory.New(),
 			}
 
@@ -254,6 +257,7 @@ func TestStopPodSandboxMetrics(t *testing.T) {
 			nriPluginRequestsLatencySeconds.Reset()
 			np := &NetworkDriver{
 				podConfigStore: tc.podConfigStore,
+				swiftV2Store:   NewSwiftV2PodConfigStore(),
 				netdb:          inventory.New(),
 			}
 			podUID := types.UID("test-pod")
@@ -321,6 +325,7 @@ func TestRemovePodSandboxMetrics(t *testing.T) {
 			nriPluginRequestsLatencySeconds.Reset()
 			np := &NetworkDriver{
 				podConfigStore: tc.podConfigStore,
+				swiftV2Store:   NewSwiftV2PodConfigStore(),
 				netdb:          inventory.New(),
 			}
 			podUID := types.UID("test-pod")
