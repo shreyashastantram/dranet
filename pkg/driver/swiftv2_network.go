@@ -38,6 +38,12 @@ const (
 	// swiftV2DelegatedIfName is the interface name assigned to delegated NICs
 	// inside the pod namespace (both shared ipvlan children and dedicated NICs
 	// when NRI plumbs them).
+	//
+	// The CNI computes this dynamically as "eth" + strconv.Itoa(endpointIndex),
+	// where endpointIndex starts at 1 (eth0 is the infra NIC from CNI_IFNAME).
+	// Since each pod currently gets exactly one delegated NIC, the index is
+	// always 1. If multi-delegated-NIC pods are ever supported, this should be
+	// replaced with a computed name.
 	swiftV2DelegatedIfName = "eth1"
 )
 
@@ -82,18 +88,72 @@ func nsAttachIPVlanL3(cfg *NICConfig, containerNsPath string) (*resourceapi.Netw
 		return nil, fmt.Errorf("parent NIC (MAC %s) not found: %w", cfg.MAC, err)
 	}
 
-	// Create ipvlan L3 sub-interface off physical NIC.
-	// Name uses first 8 chars of PodUID to keep it unique and short.
+	// Compute the deterministic ipvlan child name (first 8 chars of PodUID).
 	ipvlName := fmt.Sprintf("ipvl-%s", truncateUID(cfg.PodUID))
-	ipvl := &netlink.IPVlan{
-		LinkAttrs: netlink.LinkAttrs{
-			Name:        ipvlName,
-			ParentIndex: parent.Attrs().Index,
-		},
-		Mode: netlink.IPVLAN_MODE_L3,
+
+	// Open the container namespace and netlink handle early so we can clean up
+	// stale state from any previous failed attempt before creating new resources.
+	containerNs, err := netns.GetFromPath(containerNsPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get netns %s: %w", containerNsPath, err)
 	}
-	if err := netlink.LinkAdd(ipvl); err != nil {
-		return nil, fmt.Errorf("failed to create ipvlan L3 interface %s on parent (MAC %s): %w", ipvlName, cfg.MAC, err)
+	defer containerNs.Close()
+
+	nhNs, err := nlwrap.NewHandleAt(containerNs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get netlink handle in netns %s: %w", containerNsPath, err)
+	}
+	defer nhNs.Close()
+
+	// --- Idempotent cleanup of stale state from previous failed attempts ---
+	// A previous call may have partially completed, leaving behind:
+	//   1. ipvl-<uid> on the host  (created but never moved to pod ns — reuse it)
+	//   2. ipvl-<uid> in the pod ns (moved but never renamed to eth1)
+	//   3. eth1 in the pod ns       (renamed but IP/route config failed)
+	// Clean up pod-ns artifacts and reuse the host-side child if it exists.
+
+	// Remove stale ipvlan child from pod ns (moved but not renamed).
+	if stale, err := nhNs.LinkByName(ipvlName); err == nil {
+		klog.V(2).Infof("SwiftV2: removing stale ipvlan child %s from pod ns (previous failed attempt)", ipvlName)
+		_ = nhNs.LinkDel(stale)
+	}
+
+	// Remove stale eth1 from pod ns (renamed but later steps failed).
+	if stale, err := nhNs.LinkByName(swiftV2DelegatedIfName); err == nil {
+		klog.V(2).Infof("SwiftV2: removing stale %s from pod ns (previous failed attempt)", swiftV2DelegatedIfName)
+		_ = nhNs.LinkDel(stale)
+	}
+
+	// --- Reuse or create ipvlan child on host ---
+
+	// If ipvl-<uid> already exists on the host (from a previous attempt that
+	// created it but failed before moving it to the pod ns), reuse it rather
+	// than deleting and recreating — the interface is already correctly
+	// parented to the physical NIC.
+	ipvl, err := nlwrap.LinkByName(ipvlName)
+	if err != nil {
+		var notFound netlink.LinkNotFoundError
+		if !errors.As(err, &notFound) {
+			return nil, fmt.Errorf("failed to look up ipvlan %s on host: %w", ipvlName, err)
+		}
+
+		// No existing child — create a fresh ipvlan L3 sub-interface.
+		newIPVL := &netlink.IPVlan{
+			LinkAttrs: netlink.LinkAttrs{
+				Name:        ipvlName,
+				ParentIndex: parent.Attrs().Index,
+			},
+			Mode: netlink.IPVLAN_MODE_L3,
+		}
+		if err := netlink.LinkAdd(newIPVL); err != nil {
+			return nil, fmt.Errorf("failed to create ipvlan L3 interface %s on parent (MAC %s): %w", ipvlName, cfg.MAC, err)
+		}
+		ipvl, err = nlwrap.LinkByName(ipvlName)
+		if err != nil {
+			return nil, fmt.Errorf("ipvlan %s not found after creation: %w", ipvlName, err)
+		}
+	} else {
+		klog.V(2).Infof("SwiftV2: reusing existing ipvlan child %s on host (previous failed attempt)", ipvlName)
 	}
 
 	// Add host-side /32 route for host-to-pod traffic.
@@ -114,23 +174,11 @@ func nsAttachIPVlanL3(cfg *NICConfig, containerNsPath string) (*resourceapi.Netw
 	}
 
 	// Move sub-interface into pod network namespace.
-	containerNs, err := netns.GetFromPath(containerNsPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get netns %s: %w", containerNsPath, err)
-	}
-	defer containerNs.Close()
-
 	if err := netlink.LinkSetNsFd(ipvl, int(containerNs)); err != nil {
 		return nil, fmt.Errorf("failed to move ipvlan %s to netns %s: %w", ipvlName, containerNsPath, err)
 	}
 
 	// --- Pod namespace operations ---
-
-	nhNs, err := nlwrap.NewHandleAt(containerNs)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get netlink handle in netns %s: %w", containerNsPath, err)
-	}
-	defer nhNs.Close()
 
 	nsLink, err := nhNs.LinkByName(ipvlName)
 	if err != nil {
@@ -138,7 +186,9 @@ func nsAttachIPVlanL3(cfg *NICConfig, containerNsPath string) (*resourceapi.Netw
 	}
 
 	// Rename to eth1 inside the pod namespace.
-	if err := netlink.LinkSetName(nsLink, swiftV2DelegatedIfName); err != nil {
+	// Must use the container namespace handle (nhNs) because the link lives
+	// there — the default package handle operates in the host namespace.
+	if err := nhNs.LinkSetName(nsLink, swiftV2DelegatedIfName); err != nil {
 		return nil, fmt.Errorf("failed to rename %s to %s: %w", ipvlName, swiftV2DelegatedIfName, err)
 	}
 
@@ -271,9 +321,9 @@ func nsAttachDedicatedNIC(cfg *NICConfig, containerNsPath string, addresses []st
 	// Find NIC by MAC address on the host, matching CNI's GetNetworkInterfaceByMac.
 	hostLink, err := findLinkByMAC(cfg.MAC)
 	if err != nil {
-		// NIC not on host — it may have been moved into the pod netns by CNI
-		// between our nicExistsInNetns check and now (TOCTOU race). Verify
-		// it's in the pod netns before reporting an error.
+		// NIC not on host: verify whether it is already in the pod namespace.
+		// If yes, treat as idempotent success and perform no additional operations.
+		// If no, return an error because the NIC cannot be found in either location.
 		if nicExistsInNetns(containerNsPath, cfg.MAC) {
 			klog.V(2).Infof("SwiftV2 dedicated NIC: MAC %s not on host but already in pod netns (CNI race), skipping", cfg.MAC)
 			return &resourceapi.NetworkDeviceData{
@@ -436,6 +486,9 @@ func cleanupDedicatedNIC(containerNsPath string, mac string) {
 	}
 
 	// Move NIC back to host namespace.
+	// Must use the container namespace handle (nhNs) because the link lives
+	// there — the default package handle operates in the host namespace and
+	// would look up the wrong link index.
 	rootNs, err := netns.Get()
 	if err != nil {
 		klog.Warningf("SwiftV2 cleanup: failed to get root netns: %v", err)
@@ -443,7 +496,7 @@ func cleanupDedicatedNIC(containerNsPath string, mac string) {
 	}
 	defer rootNs.Close()
 
-	if err := netlink.LinkSetNsFd(nicLink, int(rootNs)); err != nil {
+	if err := nhNs.LinkSetNsFd(nicLink, int(rootNs)); err != nil {
 		klog.Warningf("SwiftV2 cleanup: failed to move NIC (MAC %s) back to host: %v", mac, err)
 		return
 	}

@@ -64,8 +64,10 @@ func (np *NetworkDriver) runPodSandboxSwiftV2(pod *api.PodSandbox, configs map[s
 				continue
 			}
 
-			// Idempotent check: if the NIC already exists in the pod namespace
-			// (CNI already plumbed it), skip entirely. No IP, no routes, no DHCP.
+			// Idempotent gate for dedicated NIC migration:
+			// - If NIC is already in the pod namespace, do nothing.
+			// - If NIC is not in the pod namespace, proceed to move and configure it.
+			// This ensures NRI never re-plumbs a NIC that has already been moved.
 			if nicExistsInNetns(ns, cfg.NIC.MAC) {
 				klog.V(2).Infof("SwiftV2 RunPodSandbox: dedicated NIC %s (MAC %s) already in pod netns, skipping (CNI plumbed)",
 					deviceName, cfg.NIC.MAC)
