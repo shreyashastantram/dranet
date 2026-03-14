@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"sigs.k8s.io/dranet/pkg/apis"
+	"sigs.k8s.io/dranet/pkg/cnsclient"
 	"sigs.k8s.io/dranet/pkg/filter"
 
 	"github.com/Mellanox/rdmamap"
@@ -43,6 +44,14 @@ import (
 
 const (
 	rdmaCmPath = "/dev/infiniband/rdma_cm"
+
+	// CNS NIC resource attribute keys
+	cnsAttrNIC    = "networking.azure.com/nic"
+	cnsAttrSubnet = "networking.azure.com/subnet"
+	cnsAttrState  = "networking.azure.com/state"
+
+	// Number of slots for a shared NIC
+	cnsSharedSlots = 16
 )
 
 // DRA hooks exposes Network Devices to Kubernetes, the Network devices and its attributes are
@@ -63,11 +72,13 @@ func (np *NetworkDriver) PublishResources(ctx context.Context) {
 
 			np.publishResourcesPrometheusMetrics(devices)
 
-			resources := resourceslice.DriverResources{
-				Pools: map[string]resourceslice.Pool{
-					np.nodeName: {Slices: []resourceslice.Slice{{Devices: devices}}}},
+			np.mu.Lock()
+			np.inventoryPools = map[string]resourceslice.Pool{
+				np.nodeName: {Slices: []resourceslice.Slice{{Devices: devices}}},
 			}
-			err := np.draPlugin.PublishResources(ctx, resources)
+			np.mu.Unlock()
+
+			err := np.publishAllResources(ctx)
 			if err != nil {
 				klog.Error(err, "unexpected error trying to publish resources")
 			} else {
@@ -78,6 +89,105 @@ func (np *NetworkDriver) PublishResources(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// PublishCNSResources polls the CNS REST API for NIC resources and publishes
+// them as ResourceSlice pools alongside the inventory-discovered devices.
+func (np *NetworkDriver) PublishCNSResources(ctx context.Context) {
+	klog.V(2).Infof("Starting CNS resource publishing loop")
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if err := np.publishCNSResources(ctx); err != nil {
+				klog.Errorf("failed to publish CNS resources: %v", err)
+			}
+		case <-ctx.Done():
+			klog.V(2).Infof("CNS resource publishing loop stopped")
+			return
+		}
+	}
+}
+
+// publishCNSResources fetches the current NIC resources from CNS, converts them
+// into ResourceSlice pools (one pool per NIC), and triggers a merged publish.
+func (np *NetworkDriver) publishCNSResources(ctx context.Context) error {
+	nicResources, err := np.cnsClient.GetNICResources(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get NIC resources from CNS: %w", err)
+	}
+
+	pools := make(map[string]resourceslice.Pool, len(nicResources))
+	for i := range nicResources {
+		nic := &nicResources[i]
+		poolName := sanitizeMACForK8s(nic.MacAddress)
+		devices := np.buildCNSDevices(nic)
+		pools[poolName] = resourceslice.Pool{
+			Slices: []resourceslice.Slice{{Devices: devices}},
+		}
+	}
+
+	np.mu.Lock()
+	np.cnsPools = pools
+	np.mu.Unlock()
+
+	return np.publishAllResources(ctx)
+}
+
+// buildCNSDevices converts a single CNS NICResource into DRA Device objects.
+// A shared NIC produces 16 slots; a dedicated NIC produces 1 slot.
+func (np *NetworkDriver) buildCNSDevices(nic *cnsclient.NICResource) []resourceapi.Device {
+	slotCount := 1
+	if nic.SharedNIC {
+		slotCount = cnsSharedSlots
+	}
+
+	nicName := sanitizeMACForK8s(nic.MacAddress)
+	macAddr := nic.MacAddress
+	subnetName := nic.SubnetName
+	state := "available"
+
+	devices := make([]resourceapi.Device, 0, slotCount)
+	for i := 1; i <= slotCount; i++ {
+		deviceName := fmt.Sprintf("%s-slot-%02d", nicName, i)
+		dev := resourceapi.Device{
+			Name: deviceName,
+			Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+				cnsAttrNIC:    {StringValue: &macAddr},
+				cnsAttrSubnet: {StringValue: &subnetName},
+				cnsAttrState:  {StringValue: &state},
+			},
+		}
+		devices = append(devices, dev)
+	}
+	return devices
+}
+
+// publishAllResources merges inventory and CNS pools and publishes them
+// as a single DriverResources update via the kubelet plugin helper.
+func (np *NetworkDriver) publishAllResources(ctx context.Context) error {
+	np.mu.Lock()
+	pools := make(map[string]resourceslice.Pool)
+	for k, v := range np.inventoryPools {
+		pools[k] = v
+	}
+	for k, v := range np.cnsPools {
+		pools[k] = v
+	}
+	np.mu.Unlock()
+
+	resources := resourceslice.DriverResources{
+		Pools: pools,
+	}
+	return np.draPlugin.PublishResources(ctx, resources)
+}
+
+// sanitizeMACForK8s converts a MAC address to a Kubernetes-compatible name
+// by lowercasing and replacing colons with hyphens.
+func sanitizeMACForK8s(mac string) string {
+	return strings.ReplaceAll(strings.ToLower(mac), ":", "-")
 }
 
 func (np *NetworkDriver) publishResourcesPrometheusMetrics(devices []resourceapi.Device) {

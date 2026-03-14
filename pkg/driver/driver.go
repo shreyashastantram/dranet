@@ -21,10 +21,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/google/cel-go/cel"
 	"sigs.k8s.io/dranet/pkg/apis"
+	"sigs.k8s.io/dranet/pkg/cnsclient"
 	"sigs.k8s.io/dranet/pkg/inventory"
 
 	"github.com/containerd/nri/pkg/stub"
@@ -81,6 +83,13 @@ func WithInventory(db inventoryDB) Option {
 	}
 }
 
+// WithCNSClient sets the CNS HTTP client for Azure NIC resource discovery.
+func WithCNSClient(client *cnsclient.Client) Option {
+	return func(o *NetworkDriver) {
+		o.cnsClient = client
+	}
+}
+
 type NetworkDriver struct {
 	driverName string
 	nodeName   string
@@ -91,6 +100,14 @@ type NetworkDriver struct {
 	// contains the host interfaces
 	netdb      inventoryDB
 	celProgram cel.Program
+
+	// CNS client for Azure NIC resource discovery
+	cnsClient *cnsclient.Client
+
+	// mu protects inventoryPools and cnsPools for concurrent publishing
+	mu             sync.Mutex
+	inventoryPools map[string]resourceslice.Pool
+	cnsPools       map[string]resourceslice.Pool
 
 	// Cache the rdma shared mode state
 	rdmaSharedMode bool
@@ -207,6 +224,11 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 
 	// publish available resources
 	go plugin.PublishResources(ctx)
+
+	// publish CNS NIC resources if CNS client is configured
+	if plugin.cnsClient != nil {
+		go plugin.PublishCNSResources(ctx)
+	}
 
 	return plugin, nil
 }
