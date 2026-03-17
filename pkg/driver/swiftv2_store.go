@@ -38,7 +38,7 @@ const (
 // network namespace. The NICMode field on SwiftV2PodConfig determines which
 // fields are relevant:
 //   - Shared mode uses MAC (to find the parent), PodIP, GatewayIP, SubnetPrefix, PodUID
-//   - Dedicated mode uses MAC (to find the NIC) and GatewayIP
+//   - Dedicated mode uses MAC (to find the NIC), GatewayIP, and Addresses
 type NICConfig struct {
 	// MAC is the NIC's MAC address. For shared mode, this identifies the parent
 	// NIC (shared by all ipvlan children). For dedicated mode, this identifies
@@ -47,6 +47,9 @@ type NICConfig struct {
 	MAC string
 	// GatewayIP is the virtual gateway IP for routing (e.g., "169.254.2.1").
 	GatewayIP string
+	// Addresses are the IP/CIDR addresses to assign for dedicated NIC mode
+	// (e.g., ["10.244.2.50/24"]).
+	Addresses []string
 	// PodIP is the IP address assigned to this pod (shared mode only, e.g., "10.0.1.10").
 	PodIP string
 	// SubnetPrefix is the subnet prefix length (shared mode only, e.g., 24).

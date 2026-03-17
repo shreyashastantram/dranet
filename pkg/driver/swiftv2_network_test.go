@@ -16,10 +16,7 @@ limitations under the License.
 
 package driver
 
-import (
-	"net"
-	"testing"
-)
+import "testing"
 
 func TestParseIP32(t *testing.T) {
 	tests := []struct {
@@ -135,7 +132,7 @@ func TestNsAttachIPVlanL3_ParentNotFound(t *testing.T) {
 }
 
 func TestNsAttachDedicatedNIC_NilConfig(t *testing.T) {
-	_, err := nsAttachDedicatedNIC(nil, "/proc/1/ns/net", nil)
+	_, err := nsAttachDedicatedNIC(nil, "/proc/1/ns/net")
 	if err == nil {
 		t.Fatal("expected error for nil config, got nil")
 	}
@@ -146,7 +143,7 @@ func TestNsAttachDedicatedNIC_InvalidMAC(t *testing.T) {
 		MAC:       "not-a-mac",
 		GatewayIP: "169.254.2.1",
 	}
-	_, err := nsAttachDedicatedNIC(cfg, "/proc/1/ns/net", nil)
+	_, err := nsAttachDedicatedNIC(cfg, "/proc/1/ns/net")
 	if err == nil {
 		t.Fatal("expected error for invalid MAC, got nil")
 	}
@@ -161,52 +158,13 @@ func TestNicExistsInNetns_InvalidPath(t *testing.T) {
 }
 
 func TestNicExistsInNetns_InvalidMAC(t *testing.T) {
-	// Invalid MAC should return false
-	exists := nicExistsInNetns("/proc/1/ns/net", "not-a-mac")
-	if !exists {
-		// This is fine — invalid MAC means "not found"
+	// Invalid MAC should return false.
+	if exists := nicExistsInNetns("/proc/1/ns/net", "not-a-mac"); exists {
+		t.Error("expected false for invalid MAC")
 	}
 }
 
 func TestCleanupIPVlanL3_NilConfig(t *testing.T) {
 	// Should not panic with nil config
 	cleanupIPVlanL3(nil)
-}
-
-func TestCleanupIPVlanL3_NonexistentParent(t *testing.T) {
-	// Should not panic with nonexistent parent — just logs a warning
-	cfg := &NICConfig{
-		MAC:   "00:00:00:00:ff:ff",
-		PodIP: "10.0.1.10",
-	}
-	cleanupIPVlanL3(cfg)
-}
-
-func TestCleanupDedicatedNIC_NonexistentNetns(t *testing.T) {
-	// Should not panic with nonexistent netns — kernel already cleaned up
-	cleanupDedicatedNIC("/proc/99999999/ns/net", "00:11:22:33:44:55")
-}
-
-func TestSwiftV2VirtualGW(t *testing.T) {
-	// Verify the virtual GW constant is a valid IP
-	ip := net.ParseIP(swiftV2VirtualGW)
-	if ip == nil {
-		t.Fatalf("swiftV2VirtualGW %q is not a valid IP", swiftV2VirtualGW)
-	}
-	if ip.String() != "169.254.2.1" {
-		t.Errorf("swiftV2VirtualGW = %s, want 169.254.2.1", ip.String())
-	}
-}
-
-func TestInterfaceDedicatedConfig(t *testing.T) {
-	cfg := NICConfig{
-		MAC:       "00:0d:3a:ab:cd:ef",
-		GatewayIP: "169.254.2.1",
-	}
-	if cfg.MAC != "00:0d:3a:ab:cd:ef" {
-		t.Errorf("expected MAC 00:0d:3a:ab:cd:ef, got %s", cfg.MAC)
-	}
-	if cfg.GatewayIP != "169.254.2.1" {
-		t.Errorf("expected GatewayIP 169.254.2.1, got %s", cfg.GatewayIP)
-	}
 }

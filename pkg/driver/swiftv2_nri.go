@@ -24,6 +24,11 @@ import (
 	"k8s.io/klog/v2"
 )
 
+var (
+	nsAttachSwiftV2NICHook = nsAttachSwiftV2NIC
+	nicExistsInNetnsHook   = nicExistsInNetns
+)
+
 // runPodSandboxSwiftV2 processes SwiftV2-managed devices for a pod during
 // the NRI RunPodSandbox hook. It handles both shared NIC (ipvlan L3) and
 // dedicated NIC (physical NIC move) configurations.
@@ -51,7 +56,7 @@ func (np *NetworkDriver) runPodSandboxSwiftV2(pod *api.PodSandbox, configs map[s
 			klog.V(2).Infof("SwiftV2 RunPodSandbox: attaching shared ipvlan L3 for device %s (MAC %s, pod IP %s) on pod %s/%s",
 				deviceName, cfg.NIC.MAC, cfg.NIC.PodIP, pod.Namespace, pod.Name)
 
-			networkData, err := nsAttachIPVlanL3(&cfg.NIC, ns)
+			networkData, err := nsAttachSwiftV2NICHook(cfg.Mode, &cfg.NIC, ns)
 			if err != nil {
 				return fmt.Errorf("SwiftV2 RunPodSandbox: failed to attach ipvlan L3 for device %s: %w", deviceName, err)
 			}
@@ -68,7 +73,7 @@ func (np *NetworkDriver) runPodSandboxSwiftV2(pod *api.PodSandbox, configs map[s
 			// - If NIC is already in the pod namespace, do nothing.
 			// - If NIC is not in the pod namespace, proceed to move and configure it.
 			// This ensures NRI never re-plumbs a NIC that has already been moved.
-			if nicExistsInNetns(ns, cfg.NIC.MAC) {
+			if nicExistsInNetnsHook(ns, cfg.NIC.MAC) {
 				klog.V(2).Infof("SwiftV2 RunPodSandbox: dedicated NIC %s (MAC %s) already in pod netns, skipping (CNI plumbed)",
 					deviceName, cfg.NIC.MAC)
 				continue
@@ -77,7 +82,7 @@ func (np *NetworkDriver) runPodSandboxSwiftV2(pod *api.PodSandbox, configs map[s
 			klog.V(2).Infof("SwiftV2 RunPodSandbox: attaching dedicated NIC %s (MAC %s) to pod %s/%s",
 				deviceName, cfg.NIC.MAC, pod.Namespace, pod.Name)
 
-			networkData, err := nsAttachDedicatedNIC(&cfg.NIC, ns, cfg.InterfaceConfig.Interface.Addresses)
+			networkData, err := nsAttachSwiftV2NICHook(cfg.Mode, &cfg.NIC, ns)
 			if err != nil {
 				return fmt.Errorf("SwiftV2 RunPodSandbox: failed to attach dedicated NIC for device %s: %w", deviceName, err)
 			}

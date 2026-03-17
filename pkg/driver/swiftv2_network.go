@@ -270,6 +270,21 @@ func cleanupIPVlanL3(cfg *NICConfig) {
 	}
 }
 
+// nsAttachSwiftV2NIC is the common attach entrypoint for SwiftV2 networking.
+// Behavior is driven by mode:
+//   - shared: attach ipvlan L3 child off a delegated parent NIC
+//   - dedicated: move a delegated physical NIC into pod netns
+func nsAttachSwiftV2NIC(mode NICMode, cfg *NICConfig, containerNsPath string) (*resourceapi.NetworkDeviceData, error) {
+	switch mode {
+	case NICModeShared:
+		return nsAttachIPVlanL3(cfg, containerNsPath)
+	case NICModeDedicated:
+		return nsAttachDedicatedNIC(cfg, containerNsPath)
+	default:
+		return nil, fmt.Errorf("unsupported SwiftV2 NIC mode %q", mode)
+	}
+}
+
 // nicExistsInNetns checks whether a NIC with the given MAC address already
 // exists in the specified network namespace. Used for idempotent dedicated NIC
 // plumbing — if CNI has already moved the NIC in, NRI skips entirely.
@@ -313,7 +328,7 @@ func nicExistsInNetns(containerNsPath string, mac string) bool {
 //   - Assign IP addresses
 //   - Add routes: virtual GW /32 scope link + default via virtual GW
 //   - Issue DHCP discover for DNS wireserver mapping (background goroutine)
-func nsAttachDedicatedNIC(cfg *NICConfig, containerNsPath string, addresses []string) (*resourceapi.NetworkDeviceData, error) {
+func nsAttachDedicatedNIC(cfg *NICConfig, containerNsPath string) (*resourceapi.NetworkDeviceData, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("NICConfig is nil")
 	}
@@ -372,7 +387,7 @@ func nsAttachDedicatedNIC(cfg *NICConfig, containerNsPath string, addresses []st
 		HardwareAddress: targetMAC.String(),
 	}
 
-	for _, addr := range addresses {
+	for _, addr := range cfg.Addresses {
 		ip, ipNet, err := net.ParseCIDR(addr)
 		if err != nil {
 			klog.Warningf("SwiftV2 dedicated NIC: invalid address %s: %v", addr, err)
@@ -388,7 +403,7 @@ func nsAttachDedicatedNIC(cfg *NICConfig, containerNsPath string, addresses []st
 
 	// Delete kernel-added subnet routes (matches CNI ConfigureContainerInterfacesAndRoutes).
 	// When assigning an IP, the kernel auto-adds a subnet route that we need to remove.
-	for _, addr := range addresses {
+	for _, addr := range cfg.Addresses {
 		_, ipNet, err := net.ParseCIDR(addr)
 		if err != nil {
 			continue

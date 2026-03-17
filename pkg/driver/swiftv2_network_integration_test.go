@@ -676,24 +676,20 @@ func TestIntegration_nsAttachDedicatedNIC_FullCycle(t *testing.T) {
 	_, nsPath := testNetns(t)
 	nicMAC := testDummyNIC(t, "test-swift-ded")
 
-	// Build NICConfig — for dedicated NICs, only MAC and GatewayIP are needed.
-	// PodIP/SubnetPrefix are not used because addresses come from the separate
-	// 'addresses' parameter (supporting multiple IPs per NIC).
+	// Build NICConfig for dedicated NIC. Addresses are carried directly in
+	// NICConfig for dedicated mode.
 	cfg := &NICConfig{
 		MAC:       nicMAC,
 		GatewayIP: swiftV2VirtualGW,
+		Addresses: []string{"10.244.2.50/24"},
 	}
 
 	// Dummy NIC quirk: ensure the host-side MAC is still the expected value
 	// before invoking MAC-based dedicated attach logic.
 	ensureLinkMAC(t, "test-swift-ded", nicMAC)
 
-	// Dedicated NICs receive their IP with a subnet mask (e.g., /24) rather than
-	// the /32 point-to-point addressing used by shared NICs.
-	addresses := []string{"10.244.2.50/24"}
-
 	// --- Attach: move NIC into pod ns with full IP + route configuration ---
-	deviceData, err := nsAttachDedicatedNIC(cfg, nsPath, addresses)
+	deviceData, err := nsAttachDedicatedNIC(cfg, nsPath)
 	if err != nil {
 		t.Fatalf("nsAttachDedicatedNIC failed: %v", err)
 	}
@@ -752,17 +748,15 @@ func TestIntegration_nsAttachDedicatedNIC_MultipleAddresses(t *testing.T) {
 	cfg := &NICConfig{
 		MAC:       nicMAC,
 		GatewayIP: swiftV2VirtualGW,
+		Addresses: []string{"10.244.3.10/24", "10.244.3.11/24"},
 	}
 
 	// Dummy NIC quirk: ensure the host-side MAC is still the expected value
 	// before invoking MAC-based dedicated attach logic.
 	ensureLinkMAC(t, "test-swift-mip", nicMAC)
 
-	// Two IPs on the same /24 subnet — both should be assigned to the NIC.
-	addresses := []string{"10.244.3.10/24", "10.244.3.11/24"}
-
 	// Attach the dedicated NIC with both addresses.
-	deviceData, err := nsAttachDedicatedNIC(cfg, nsPath, addresses)
+	deviceData, err := nsAttachDedicatedNIC(cfg, nsPath)
 	if err != nil {
 		t.Fatalf("nsAttachDedicatedNIC failed: %v", err)
 	}
@@ -1003,7 +997,7 @@ func TestIntegration_DedicatedNIC_AlreadyInNetns(t *testing.T) {
 	// (findLinkByMAC returns an error), then fall through to the TOCTOU check
 	// which calls nicExistsInNetns and discovers the NIC is already in the pod ns.
 	// It should return success with the NIC's MAC address.
-	deviceData, err := nsAttachDedicatedNIC(cfg, nsPath, nil)
+	deviceData, err := nsAttachDedicatedNIC(cfg, nsPath)
 	if err != nil {
 		t.Fatalf("nsAttachDedicatedNIC should have handled NIC already in pod ns: %v", err)
 	}
