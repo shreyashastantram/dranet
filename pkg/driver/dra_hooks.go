@@ -253,13 +253,10 @@ func (np *NetworkDriver) prepareResourceClaim(ctx context.Context, claim *resour
 		klog.V(2).Infof("PrepareResourceClaim Claim %s/%s  took %v", claim.Namespace, claim.Name, time.Since(start))
 	}()
 	// TODO: shared devices may allocate the same device to multiple pods, i.e. macvlan, ipvlan, ...
-	podUIDs := []types.UID{}
-	for _, reserved := range claim.Status.ReservedFor {
-		if reserved.Resource != "pods" || reserved.APIGroup != "" {
-			klog.Infof("Driver only supports Pods, unsupported reference %#v", reserved)
-			continue
-		}
-		podUIDs = append(podUIDs, reserved.UID)
+	podConsumers := getPodConsumers(claim)
+	podUIDs := make([]types.UID, 0, len(podConsumers))
+	for _, pod := range podConsumers {
+		podUIDs = append(podUIDs, pod.UID)
 	}
 	if len(podUIDs) == 0 {
 		klog.Infof("no pods allocated to claim %s/%s", claim.Namespace, claim.Name)
@@ -282,6 +279,7 @@ func (np *NetworkDriver) prepareResourceClaim(ctx context.Context, claim *resour
 
 	var errorList []error
 	charDevices := sets.New[string]()
+	goalStateByPod := map[types.UID][]cnsclient.PodIPInfo{}
 	for _, result := range claim.Status.Allocation.Devices.Results {
 		// A single ResourceClaim can have devices managed by distinct DRA
 		// drivers. One common use case for this is device topology alignment
@@ -482,6 +480,14 @@ func (np *NetworkDriver) prepareResourceClaim(ctx context.Context, claim *resour
 		// we'll create the subinterface here
 		for _, uid := range podUIDs {
 			np.podConfigStore.Set(uid, result.Device, podCfg)
+		}
+		if np.cnsClient != nil {
+			deviceMAC := link.Attrs().HardwareAddr.String()
+			for _, pod := range podConsumers {
+				if err := np.populateSwiftV2StoreForDevice(ctx, pod, result.Device, deviceMAC, goalStateByPod); err != nil {
+					errorList = append(errorList, err)
+				}
+			}
 		}
 		klog.V(4).Infof("Claim Resources for pods %v : %#v", podUIDs, podCfg)
 	}
