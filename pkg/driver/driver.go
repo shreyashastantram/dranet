@@ -144,7 +144,7 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 	}
 
 	driverPluginPath := filepath.Join(kubeletPluginPath, driverName)
-	err = os.MkdirAll(driverPluginPath, 0750)
+	err = os.MkdirAll(driverPluginPath, 0o750)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create plugin path %s: %v", driverPluginPath, err)
 	}
@@ -204,6 +204,7 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 
 	// register the host network interfaces
 	if plugin.netdb == nil {
+		klog.Info("netdb is not initialized. init-ing now")
 		plugin.netdb = inventory.New()
 	}
 	go func() {
@@ -227,7 +228,10 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 
 	// publish CNS NIC resources if CNS client is configured
 	if plugin.cnsClient != nil {
+		klog.Info("CNS client configured, starting CNS resource discovery and publishing")
 		go plugin.PublishCNSResources(ctx)
+	} else {
+		klog.Info("CNS client not configured, skipping CNS resource discovery and publishing")
 	}
 
 	return plugin, nil

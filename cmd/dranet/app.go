@@ -47,7 +47,8 @@ import (
 )
 
 const (
-	driverName = "dra.net"
+	driverName     = "dra.net"
+	defaultBaseURL = "http://localhost:10090"
 )
 
 var (
@@ -167,12 +168,19 @@ func main() {
 		inventory.WithMaxPollInterval(maxPollInterval),
 	)
 	opts = append(opts, driver.WithInventory(db))
+
+	if cnsURL == "" {
+		cnsURL = defaultBaseURL
+	}
+
 	if cnsURL != "" {
 		cnsClient, err := cnsclient.New(cnsURL, 0)
 		if err != nil {
 			klog.Fatalf("failed to create CNS client: %v", err)
 		}
 		opts = append(opts, driver.WithCNSClient(cnsClient))
+	} else {
+		klog.Info("CNS URL not provided, skipping CNS client initialization and CNS resource publishing")
 	}
 	dranet, err := driver.Start(ctx, driverName, clientset, nodeName, opts...)
 	if err != nil {
