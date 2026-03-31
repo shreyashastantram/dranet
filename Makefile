@@ -50,7 +50,7 @@ ensure-buildx:
 # get image name from directory we're building
 IMAGE_NAME=dranet
 # docker image registry, default to upstream
-REGISTRY?=gcr.io/k8s-staging-networking
+REGISTRY?=acndev.azurecr.io
 # tag based on date-sha
 TAG?=$(shell echo "$$(date +v%Y%m%d)-$$(git describe --always --dirty)")
 # the full image tag
