@@ -29,8 +29,6 @@ import (
 	"sigs.k8s.io/dranet/pkg/filter"
 
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/Mellanox/rdmamap"
 	"github.com/vishvananda/netlink"
@@ -55,14 +53,6 @@ const (
 
 	// Consumable capacity key (KEP-5075)
 	cnsCapSlots = "networking.azure.com/slots"
-
-	// Default block size for shared NIC (number of pods per NIC)
-	defaultBlockSize = 16
-
-	// NICNetworkConfig CRD GVR
-	nicNCGroup    = "multitenancy.acn.azure.com"
-	nicNCVersion  = "v1alpha1"
-	nicNCResource = "nicnetworkconfigs"
 )
 
 // DRA hooks exposes Network Devices to Kubernetes, the Network devices and its attributes are
@@ -89,7 +79,7 @@ func (np *NetworkDriver) PublishResources(ctx context.Context) {
 			}
 			np.mu.Unlock()
 
-			err := np.publishAllResources(ctx)
+			err := np.publishInventoryResources(ctx)
 			if err != nil {
 				klog.Error(err, "unexpected error trying to publish resources")
 			} else {
@@ -131,9 +121,6 @@ func (np *NetworkDriver) publishCNSResources(ctx context.Context) error {
 	}
 	klog.V(3).Infof("Got %d NIC resources from CNS", len(nicResources))
 
-	// Look up NICNetworkConfig CRDs to determine which NICs have expanded capacity
-	nicNCCapacity := np.getNICNCCapacities(ctx)
-
 	pools := make(map[string]resourceslice.Pool, len(nicResources))
 	for i := range nicResources {
 		nic := &nicResources[i]
@@ -145,65 +132,13 @@ func (np *NetworkDriver) publishCNSResources(ctx context.Context) error {
 		if poolName == "" {
 			poolName = sanitizeMACForK8s(nic.MacAddress)
 		}
-		// If a NICNetworkConfig exists for this NIC, expand capacity to blockSize
-		if cap, ok := nicNCCapacity[poolName]; ok && cap > 0 {
-			nic.Capacity = cap
-		}
 		devices := np.buildCNSDevices(nic)
 		pools[poolName] = resourceslice.Pool{
 			Slices: []resourceslice.Slice{{Devices: devices}},
 		}
 	}
 
-	np.mu.Lock()
-	np.cnsPools = pools
-	np.mu.Unlock()
-
-	return np.publishAllResources(ctx)
-}
-
-// getNICNCCapacities queries NICNetworkConfig CRDs for this node and returns
-// a map of NIC name → blockSize for NICs that have an active NICNC.
-func (np *NetworkDriver) getNICNCCapacities(ctx context.Context) map[string]int {
-	result := make(map[string]int)
-	if np.dynamicClient == nil {
-		return result
-	}
-
-	gvr := schema.GroupVersionResource{
-		Group:    nicNCGroup,
-		Version:  nicNCVersion,
-		Resource: nicNCResource,
-	}
-
-	list, err := np.dynamicClient.Resource(gvr).Namespace("kube-system").List(ctx, metav1.ListOptions{
-		LabelSelector: "node=" + np.nodeName,
-	})
-	if err != nil {
-		klog.V(3).Infof("Failed to list NICNetworkConfig CRDs: %v", err)
-		return result
-	}
-
-	for _, item := range list.Items {
-		spec, ok := item.Object["spec"].(map[string]interface{})
-		if !ok {
-			continue
-		}
-		nicName, _ := spec["nicName"].(string)
-		if nicName == "" {
-			continue
-		}
-		blockSize := defaultBlockSize
-		if bs, ok := spec["blockSize"].(int64); ok && bs > 0 {
-			blockSize = int(bs)
-		} else if bs, ok := spec["blockSize"].(float64); ok && bs > 0 {
-			blockSize = int(bs)
-		}
-		result[nicName] = blockSize
-		klog.V(4).Infof("NICNetworkConfig found for NIC %s: blockSize=%d", nicName, blockSize)
-	}
-
-	return result
+	return np.publishCNSPools(ctx, pools)
 }
 
 // buildCNSDevices converts a single CNS NICResource into a DRA Device
@@ -264,23 +199,26 @@ func (np *NetworkDriver) buildCNSDevices(nic *cnsclient.NICResource) []resourcea
 	}
 }
 
-// publishAllResources merges inventory and CNS pools and publishes them
-// as a single DriverResources update via the kubelet plugin helper.
-func (np *NetworkDriver) publishAllResources(ctx context.Context) error {
+// publishInventoryResources publishes inventory-discovered devices via the
+// main DRA plugin (driver: dra.net).
+func (np *NetworkDriver) publishInventoryResources(ctx context.Context) error {
 	np.mu.Lock()
-	pools := make(map[string]resourceslice.Pool)
+	pools := make(map[string]resourceslice.Pool, len(np.inventoryPools))
 	for k, v := range np.inventoryPools {
-		pools[k] = v
-	}
-	for k, v := range np.cnsPools {
 		pools[k] = v
 	}
 	np.mu.Unlock()
 
-	resources := resourceslice.DriverResources{
-		Pools: pools,
+	return np.draPlugin.PublishResources(ctx, resourceslice.DriverResources{Pools: pools})
+}
+
+// publishCNSPools publishes CNS NIC resources via the dedicated CNS plugin
+// (driver: networking.azure.com).
+func (np *NetworkDriver) publishCNSPools(ctx context.Context, pools map[string]resourceslice.Pool) error {
+	if np.cnsPlugin == nil {
+		return fmt.Errorf("CNS plugin not initialized")
 	}
-	return np.draPlugin.PublishResources(ctx, resources)
+	return np.cnsPlugin.PublishResources(ctx, resourceslice.DriverResources{Pools: pools})
 }
 
 // sanitizeMACForK8s converts a MAC address to a Kubernetes-compatible name

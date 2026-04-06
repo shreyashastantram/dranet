@@ -39,7 +39,6 @@ import (
 	"sigs.k8s.io/dranet/pkg/pcidb"
 
 	resourcev1 "k8s.io/api/resource/v1"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -49,6 +48,7 @@ import (
 
 const (
 	driverName     = "dra.net"
+	cnsDriverName  = "networking.azure.com"
 	defaultBaseURL = "http://localhost:10090"
 )
 
@@ -180,13 +180,7 @@ func main() {
 			klog.Fatalf("failed to create CNS client: %v", err)
 		}
 		opts = append(opts, driver.WithCNSClient(cnsClient))
-
-		// Create dynamic client for CRD lookups (NICNetworkConfig)
-		dynClient, err := dynamic.NewForConfig(config)
-		if err != nil {
-			klog.Fatalf("failed to create dynamic client: %v", err)
-		}
-		opts = append(opts, driver.WithDynamicClient(dynClient))
+		opts = append(opts, driver.WithCNSDriverName(cnsDriverName))
 	} else {
 		klog.Info("CNS URL not provided, skipping CNS client initialization and CNS resource publishing")
 	}

@@ -34,7 +34,6 @@ import (
 
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
@@ -91,19 +90,21 @@ func WithCNSClient(client *cnsclient.Client) Option {
 	}
 }
 
-// WithDynamicClient sets the dynamic Kubernetes client for CRD lookups.
-func WithDynamicClient(client dynamic.Interface) Option {
+// WithCNSDriverName sets the DRA driver name used for CNS resource publishing.
+func WithCNSDriverName(name string) Option {
 	return func(o *NetworkDriver) {
-		o.dynamicClient = client
+		o.cnsDriverName = name
 	}
 }
 
 type NetworkDriver struct {
-	driverName string
-	nodeName   string
-	kubeClient kubernetes.Interface
-	draPlugin  pluginHelper
-	nriPlugin  stub.Stub
+	driverName    string
+	cnsDriverName string
+	nodeName      string
+	kubeClient    kubernetes.Interface
+	draPlugin     pluginHelper
+	cnsPlugin     pluginHelper // separate kubelet plugin for CNS resources
+	nriPlugin     stub.Stub
 
 	// contains the host interfaces
 	netdb      inventoryDB
@@ -112,13 +113,9 @@ type NetworkDriver struct {
 	// CNS client for Azure NIC resource discovery
 	cnsClient *cnsclient.Client
 
-	// Dynamic client for CRD lookups (e.g., NICNetworkConfig)
-	dynamicClient dynamic.Interface
-
-	// mu protects inventoryPools and cnsPools for concurrent publishing
+	// mu protects inventoryPools for concurrent publishing
 	mu             sync.Mutex
 	inventoryPools map[string]resourceslice.Pool
-	cnsPools       map[string]resourceslice.Pool
 
 	// Cache the rdma shared mode state
 	rdmaSharedMode bool
@@ -237,10 +234,38 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 	// publish available resources
 	go plugin.PublishResources(ctx)
 
-	// publish CNS NIC resources if CNS client is configured
-	if plugin.cnsClient != nil {
-		klog.Info("CNS client configured, starting CNS resource discovery and publishing")
+	// Start a separate kubelet plugin for CNS resources if configured
+	if plugin.cnsClient != nil && plugin.cnsDriverName != "" {
+		cnsPluginPath := filepath.Join(kubeletPluginPath, plugin.cnsDriverName)
+		err = os.MkdirAll(cnsPluginPath, 0o750)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create CNS plugin path %s: %v", cnsPluginPath, err)
+		}
+
+		cnsOpts := []kubeletplugin.Option{
+			kubeletplugin.DriverName(plugin.cnsDriverName),
+			kubeletplugin.NodeName(nodeName),
+			kubeletplugin.KubeClient(kubeClient),
+		}
+		cnsD, err := kubeletplugin.Start(ctx, plugin, cnsOpts...)
+		if err != nil {
+			return nil, fmt.Errorf("start CNS kubelet plugin: %w", err)
+		}
+		plugin.cnsPlugin = cnsD
+		err = wait.PollUntilContextTimeout(ctx, 1*time.Second, 30*time.Second, true, func(context.Context) (bool, error) {
+			status := plugin.cnsPlugin.RegistrationStatus()
+			if status == nil {
+				return false, nil
+			}
+			return status.PluginRegistered, nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("CNS kubelet plugin registration failed: %w", err)
+		}
+		klog.Infof("CNS kubelet plugin registered as %s", plugin.cnsDriverName)
 		go plugin.PublishCNSResources(ctx)
+	} else if plugin.cnsClient != nil {
+		klog.Info("CNS client configured but no CNS driver name set, skipping CNS resource publishing")
 	} else {
 		klog.Info("CNS client not configured, skipping CNS resource discovery and publishing")
 	}
@@ -251,6 +276,10 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 func (np *NetworkDriver) Stop() {
 	// Stop NRI Plugin (it's expected that it returns when fully stopped).
 	np.nriPlugin.Stop()
+	// Stop CNS Plugin if running.
+	if np.cnsPlugin != nil {
+		np.cnsPlugin.Stop()
+	}
 	// Stop DRA Plugin (returns only after it has fully stopped).
 	np.draPlugin.Stop()
 }
