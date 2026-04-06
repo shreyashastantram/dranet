@@ -34,6 +34,7 @@ import (
 
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
@@ -90,6 +91,13 @@ func WithCNSClient(client *cnsclient.Client) Option {
 	}
 }
 
+// WithDynamicClient sets the dynamic Kubernetes client for CRD lookups.
+func WithDynamicClient(client dynamic.Interface) Option {
+	return func(o *NetworkDriver) {
+		o.dynamicClient = client
+	}
+}
+
 type NetworkDriver struct {
 	driverName string
 	nodeName   string
@@ -103,6 +111,9 @@ type NetworkDriver struct {
 
 	// CNS client for Azure NIC resource discovery
 	cnsClient *cnsclient.Client
+
+	// Dynamic client for CRD lookups (e.g., NICNetworkConfig)
+	dynamicClient dynamic.Interface
 
 	// mu protects inventoryPools and cnsPools for concurrent publishing
 	mu             sync.Mutex

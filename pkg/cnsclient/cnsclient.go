@@ -35,12 +35,14 @@ const (
 
 // NICResource represents a network interface resource from the VM.
 type NICResource struct {
-	MacAddress             string `json:"macAddress"`
-	InterfaceCompartmentID string `json:"interfaceCompartmentID,omitempty"`
-	NetworkID              string `json:"networkID,omitempty"`
-	VMUniqueID             string `json:"vmUniqueID,omitempty"`
-	SubnetName             string `json:"subnetName,omitempty"`
-	SharedNIC              bool   `json:"sharedNIC,omitempty"`
+	Name          string `json:"name"`
+	MacAddress    string `json:"macAddress"`
+	InterfaceName string `json:"interfaceName,omitempty"`
+	NetworkID     string `json:"networkID,omitempty"`
+	VMUniqueID    string `json:"vmUniqueID,omitempty"`
+	SubnetName    string `json:"subnetName,omitempty"`
+	SubnetID      string `json:"subnetID,omitempty"`
+	Capacity      int    `json:"capacity,omitempty"`
 }
 
 // Response represents the CNS API response status.

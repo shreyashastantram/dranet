@@ -28,6 +28,10 @@ import (
 	"sigs.k8s.io/dranet/pkg/cnsclient"
 	"sigs.k8s.io/dranet/pkg/filter"
 
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
 	"github.com/Mellanox/rdmamap"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -45,13 +49,20 @@ import (
 const (
 	rdmaCmPath = "/dev/infiniband/rdma_cm"
 
-	// CNS NIC resource attribute keys
+	// CNS NIC resource attribute keys (per dra.pdf ResourceSlice spec)
 	cnsAttrNIC    = "networking.azure.com/nic"
 	cnsAttrSubnet = "networking.azure.com/subnet"
-	cnsAttrState  = "networking.azure.com/state"
 
-	// Number of slots for a shared NIC
-	cnsSharedSlots = 16
+	// Consumable capacity key (KEP-5075)
+	cnsCapSlots = "networking.azure.com/slots"
+
+	// Default block size for shared NIC (number of pods per NIC)
+	defaultBlockSize = 16
+
+	// NICNetworkConfig CRD GVR
+	nicNCGroup    = "multitenancy.acn.azure.com"
+	nicNCVersion  = "v1alpha1"
+	nicNCResource = "nicnetworkconfigs"
 )
 
 // DRA hooks exposes Network Devices to Kubernetes, the Network devices and its attributes are
@@ -111,18 +122,33 @@ func (np *NetworkDriver) PublishCNSResources(ctx context.Context) {
 	}
 }
 
-// publishCNSResources fetches the current NIC resources from CNS, converts them
-// into ResourceSlice pools (one pool per NIC), and triggers a merged publish.
+// publishCNSResources fetches the current NIC resources from CNS, checks for
+// NICNetworkConfig CRDs to determine capacity, and triggers a merged publish.
 func (np *NetworkDriver) publishCNSResources(ctx context.Context) error {
 	nicResources, err := np.cnsClient.GetNICResources(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get NIC resources from CNS: %w", err)
 	}
+	klog.V(3).Infof("Got %d NIC resources from CNS", len(nicResources))
+
+	// Look up NICNetworkConfig CRDs to determine which NICs have expanded capacity
+	nicNCCapacity := np.getNICNCCapacities(ctx)
 
 	pools := make(map[string]resourceslice.Pool, len(nicResources))
 	for i := range nicResources {
 		nic := &nicResources[i]
-		poolName := sanitizeMACForK8s(nic.MacAddress)
+		// Use NIC name as pool name when available, then interface name, then MAC
+		poolName := nic.Name
+		if poolName == "" {
+			poolName = nic.InterfaceName
+		}
+		if poolName == "" {
+			poolName = sanitizeMACForK8s(nic.MacAddress)
+		}
+		// If a NICNetworkConfig exists for this NIC, expand capacity to blockSize
+		if cap, ok := nicNCCapacity[poolName]; ok && cap > 0 {
+			nic.Capacity = cap
+		}
 		devices := np.buildCNSDevices(nic)
 		pools[poolName] = resourceslice.Pool{
 			Slices: []resourceslice.Slice{{Devices: devices}},
@@ -136,33 +162,106 @@ func (np *NetworkDriver) publishCNSResources(ctx context.Context) error {
 	return np.publishAllResources(ctx)
 }
 
-// buildCNSDevices converts a single CNS NICResource into DRA Device objects.
-// A shared NIC produces 16 slots; a dedicated NIC produces 1 slot.
-func (np *NetworkDriver) buildCNSDevices(nic *cnsclient.NICResource) []resourceapi.Device {
-	slotCount := 1
-	if nic.SharedNIC {
-		slotCount = cnsSharedSlots
+// getNICNCCapacities queries NICNetworkConfig CRDs for this node and returns
+// a map of NIC name → blockSize for NICs that have an active NICNC.
+func (np *NetworkDriver) getNICNCCapacities(ctx context.Context) map[string]int {
+	result := make(map[string]int)
+	if np.dynamicClient == nil {
+		return result
 	}
 
-	nicName := sanitizeMACForK8s(nic.MacAddress)
-	macAddr := nic.MacAddress
-	subnetName := nic.SubnetName
-	state := "available"
+	gvr := schema.GroupVersionResource{
+		Group:    nicNCGroup,
+		Version:  nicNCVersion,
+		Resource: nicNCResource,
+	}
 
-	devices := make([]resourceapi.Device, 0, slotCount)
-	for i := 1; i <= slotCount; i++ {
-		deviceName := fmt.Sprintf("%s-slot-%02d", nicName, i)
-		dev := resourceapi.Device{
-			Name: deviceName,
-			Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-				cnsAttrNIC:    {StringValue: &macAddr},
-				cnsAttrSubnet: {StringValue: &subnetName},
-				cnsAttrState:  {StringValue: &state},
-			},
+	list, err := np.dynamicClient.Resource(gvr).Namespace("kube-system").List(ctx, metav1.ListOptions{
+		LabelSelector: "node=" + np.nodeName,
+	})
+	if err != nil {
+		klog.V(3).Infof("Failed to list NICNetworkConfig CRDs: %v", err)
+		return result
+	}
+
+	for _, item := range list.Items {
+		spec, ok := item.Object["spec"].(map[string]interface{})
+		if !ok {
+			continue
 		}
-		devices = append(devices, dev)
+		nicName, _ := spec["nicName"].(string)
+		if nicName == "" {
+			continue
+		}
+		blockSize := defaultBlockSize
+		if bs, ok := spec["blockSize"].(int64); ok && bs > 0 {
+			blockSize = int(bs)
+		} else if bs, ok := spec["blockSize"].(float64); ok && bs > 0 {
+			blockSize = int(bs)
+		}
+		result[nicName] = blockSize
+		klog.V(4).Infof("NICNetworkConfig found for NIC %s: blockSize=%d", nicName, blockSize)
 	}
-	return devices
+
+	return result
+}
+
+// buildCNSDevices converts a single CNS NICResource into a DRA Device
+// per the ResourceSlice spec in dra.pdf (KEP-5075 Consumable Capacity).
+//
+// Each NIC becomes one device with:
+//   - allowMultipleAllocations: true
+//   - attributes: networking.azure.com/nic (NIC name), networking.azure.com/subnet (empty="" for pristine)
+//   - capacity: networking.azure.com/slots with requestPolicy default=1, validRange min=1 max=1
+func (np *NetworkDriver) buildCNSDevices(nic *cnsclient.NICResource) []resourceapi.Device {
+	// Device name: NIC name > interface name > sanitized MAC
+	deviceName := nic.Name
+	if deviceName == "" {
+		deviceName = nic.InterfaceName
+	}
+	if deviceName == "" {
+		deviceName = sanitizeMACForK8s(nic.MacAddress)
+	}
+
+	// networking.azure.com/nic = NIC name (e.g., "eth1")
+	nicName := deviceName
+	// networking.azure.com/subnet = subnet ID (empty "" for pristine/placeholder)
+	subnet := nic.SubnetID
+
+	attrs := map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+		cnsAttrNIC:    {StringValue: &nicName},
+		cnsAttrSubnet: {StringValue: &subnet},
+	}
+
+	// Capacity defaults to 1 (pristine/placeholder); CNS sets blockSize when NICNC exists
+	slots := int64(1)
+	if nic.Capacity > 0 {
+		slots = int64(nic.Capacity)
+	}
+	allowMulti := true
+	defaultQty := resource.MustParse("1")
+	minQty := resource.MustParse("1")
+	maxQty := resource.MustParse("1")
+
+	return []resourceapi.Device{
+		{
+			Name:                     deviceName,
+			AllowMultipleAllocations: &allowMulti,
+			Attributes:               attrs,
+			Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
+				cnsCapSlots: {
+					Value: *resource.NewQuantity(slots, resource.DecimalSI),
+					RequestPolicy: &resourceapi.CapacityRequestPolicy{
+						Default: &defaultQty,
+						ValidRange: &resourceapi.CapacityRequestPolicyRange{
+							Min: &minQty,
+							Max: &maxQty,
+						},
+					},
+				},
+			},
+		},
+	}
 }
 
 // publishAllResources merges inventory and CNS pools and publishes them
