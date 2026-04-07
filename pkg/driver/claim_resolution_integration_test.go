@@ -185,3 +185,126 @@ func TestIntegration_PrepareResourceClaims_PopulatesSwiftV2Store(t *testing.T) {
 		})
 	}
 }
+
+func TestIntegration_PrepareCNSResourceClaim_FastPath(t *testing.T) {
+	skipIfNotRoot(t)
+
+	testCases := []struct {
+		name          string
+		podIPInfo     cnsclient.PodIPInfo
+		expectedMode  NICMode
+		expectedAddrs []string
+	}{
+		{
+			name: "shared fast path",
+			podIPInfo: cnsclient.PodIPInfo{
+				PodIPConfig:                     cnsclient.IPSubnet{IPAddress: "10.0.0.30", PrefixLength: 24},
+				NetworkContainerPrimaryIPConfig: cnsclient.IPConfiguration{GatewayIPAddress: "169.254.2.1"},
+				SharedNIC:                       true,
+			},
+			expectedMode:  NICModeShared,
+			expectedAddrs: []string{"10.0.0.30/32"},
+		},
+		{
+			name: "dedicated fast path",
+			podIPInfo: cnsclient.PodIPInfo{
+				PodIPConfig: cnsclient.IPSubnet{IPAddress: "10.0.0.40", PrefixLength: 24},
+			},
+			expectedMode:  NICModeDedicated,
+			expectedAddrs: []string{"10.0.0.40/24"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ifaceName := "cns" + tc.name[:3] + "0"
+			deviceMAC := testDummyNIC(t, ifaceName)
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				resp := tc.podIPInfo
+				resp.MacAddress = deviceMAC
+				_ = json.NewEncoder(w).Encode(cnsclient.IPConfigsResponse{
+					Response:  cnsclient.Response{ReturnCode: 0},
+					PodIPInfo: []cnsclient.PodIPInfo{resp},
+				})
+			}))
+			defer server.Close()
+
+			client, err := cnsclient.New(server.URL, 0)
+			if err != nil {
+				t.Fatalf("failed to create CNS client: %v", err)
+			}
+
+			np := &NetworkDriver{
+				driverName:     "dra.net",
+				cnsDriverName:  "networking.azure.com",
+				netdb:          newFakeInventoryDB(),
+				cnsClient:      client,
+				podConfigStore: NewPodConfigStore(),
+				swiftV2Store:   NewSwiftV2PodConfigStore(),
+			}
+
+			claim := &resourcev1.ResourceClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "cns-claim",
+					Namespace: "ns-a",
+					UID:       types.UID("cns-claim-uid"),
+				},
+				Status: resourcev1.ResourceClaimStatus{
+					ReservedFor: []resourcev1.ResourceClaimConsumerReference{{
+						APIGroup: "",
+						Resource: "pods",
+						Name:     "pod-a",
+						UID:      types.UID("pod-uid-1"),
+					}},
+					Allocation: &resourcev1.AllocationResult{
+						Devices: resourcev1.DeviceAllocationResult{
+							Results: []resourcev1.DeviceRequestAllocationResult{{
+								Driver:  "networking.azure.com",
+								Device:  ifaceName,
+								Request: "nic",
+							}},
+						},
+					},
+				},
+			}
+
+			result, err := np.PrepareResourceClaims(context.Background(), []*resourcev1.ResourceClaim{claim})
+			if err != nil {
+				t.Fatalf("PrepareResourceClaims() failed: %v", err)
+			}
+			if result[claim.UID].Err != nil {
+				t.Fatalf("PrepareResourceClaims() returned claim error: %v", result[claim.UID].Err)
+			}
+
+			// Fast path should NOT populate podConfigStore
+			if _, ok := np.podConfigStore.GetPodConfigs(types.UID("pod-uid-1")); ok {
+				t.Fatal("podConfigStore should be empty for CNS fast path")
+			}
+
+			// Fast path SHOULD populate swiftV2Store
+			swiftCfgs := np.swiftV2Store.Get(types.UID("pod-uid-1"))
+			if swiftCfgs == nil {
+				t.Fatal("expected SwiftV2 store entry")
+			}
+			swiftCfg, ok := swiftCfgs[ifaceName]
+			if !ok {
+				t.Fatalf("expected SwiftV2 device config for %s", ifaceName)
+			}
+			if swiftCfg.Mode != tc.expectedMode {
+				t.Fatalf("expected mode %s, got %s", tc.expectedMode, swiftCfg.Mode)
+			}
+			if swiftCfg.NIC.MAC != deviceMAC {
+				t.Fatalf("expected MAC %s, got %s", deviceMAC, swiftCfg.NIC.MAC)
+			}
+			if len(swiftCfg.InterfaceConfig.Interface.Addresses) != len(tc.expectedAddrs) {
+				t.Fatalf("unexpected addresses %v", swiftCfg.InterfaceConfig.Interface.Addresses)
+			}
+			for i := range tc.expectedAddrs {
+				if swiftCfg.InterfaceConfig.Interface.Addresses[i] != tc.expectedAddrs[i] {
+					t.Fatalf("address[%d]: got %s, want %s", i, swiftCfg.InterfaceConfig.Interface.Addresses[i], tc.expectedAddrs[i])
+				}
+			}
+		})
+	}
+}

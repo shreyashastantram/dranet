@@ -276,3 +276,185 @@ func TestPublishResourcesMetrics(t *testing.T) {
 		}
 	})
 }
+
+func TestIsCNSClaim(t *testing.T) {
+	tests := []struct {
+		name          string
+		cnsDriverName string
+		claim         *resourcev1.ResourceClaim
+		expected      bool
+	}{
+		{
+			name:          "no CNS driver name configured",
+			cnsDriverName: "",
+			claim: &resourcev1.ResourceClaim{
+				Status: resourcev1.ResourceClaimStatus{
+					Allocation: &resourcev1.AllocationResult{
+						Devices: resourcev1.DeviceAllocationResult{
+							Results: []resourcev1.DeviceRequestAllocationResult{
+								{Driver: "networking.azure.com", Device: "eth1"},
+							},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name:          "nil allocation",
+			cnsDriverName: "networking.azure.com",
+			claim: &resourcev1.ResourceClaim{
+				Status: resourcev1.ResourceClaimStatus{},
+			},
+			expected: false,
+		},
+		{
+			name:          "no matching driver in results",
+			cnsDriverName: "networking.azure.com",
+			claim: &resourcev1.ResourceClaim{
+				Status: resourcev1.ResourceClaimStatus{
+					Allocation: &resourcev1.AllocationResult{
+						Devices: resourcev1.DeviceAllocationResult{
+							Results: []resourcev1.DeviceRequestAllocationResult{
+								{Driver: "dra.net", Device: "eth0"},
+							},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name:          "CNS driver match",
+			cnsDriverName: "networking.azure.com",
+			claim: &resourcev1.ResourceClaim{
+				Status: resourcev1.ResourceClaimStatus{
+					Allocation: &resourcev1.AllocationResult{
+						Devices: resourcev1.DeviceAllocationResult{
+							Results: []resourcev1.DeviceRequestAllocationResult{
+								{Driver: "networking.azure.com", Device: "eth1"},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name:          "mixed drivers with CNS present",
+			cnsDriverName: "networking.azure.com",
+			claim: &resourcev1.ResourceClaim{
+				Status: resourcev1.ResourceClaimStatus{
+					Allocation: &resourcev1.AllocationResult{
+						Devices: resourcev1.DeviceAllocationResult{
+							Results: []resourcev1.DeviceRequestAllocationResult{
+								{Driver: "dra.net", Device: "eth0"},
+								{Driver: "networking.azure.com", Device: "eth1"},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			np := &NetworkDriver{cnsDriverName: tc.cnsDriverName}
+			got := np.isCNSClaim(tc.claim)
+			if got != tc.expected {
+				t.Errorf("isCNSClaim() = %v, want %v", got, tc.expected)
+			}
+		})
+	}
+}
+
+func TestPrepareResourceClaims_RoutesCNSClaimToFastPath(t *testing.T) {
+	ctx := context.Background()
+	draPluginRequestsTotal.Reset()
+
+	np := &NetworkDriver{
+		driverName:     "dra.net",
+		cnsDriverName:  "networking.azure.com",
+		netdb:          newFakeInventoryDB(),
+		podConfigStore: NewPodConfigStore(),
+		swiftV2Store:   NewSwiftV2PodConfigStore(),
+	}
+
+	// A CNS claim with no pods should succeed via the fast path without errors.
+	cnsClaim := &resourcev1.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cns-claim",
+			Namespace: "default",
+			UID:       types.UID("cns-claim-uid"),
+		},
+		Status: resourcev1.ResourceClaimStatus{
+			// No ReservedFor → no pod consumers → fast path returns empty result
+			Allocation: &resourcev1.AllocationResult{
+				Devices: resourcev1.DeviceAllocationResult{
+					Results: []resourcev1.DeviceRequestAllocationResult{
+						{Driver: "networking.azure.com", Device: "eth1", Request: "nic"},
+					},
+				},
+			},
+		},
+	}
+
+	result, err := np.PrepareResourceClaims(ctx, []*resourcev1.ResourceClaim{cnsClaim})
+	if err != nil {
+		t.Fatalf("PrepareResourceClaims failed: %v", err)
+	}
+	if res, ok := result[cnsClaim.UID]; ok && res.Err != nil {
+		t.Fatalf("expected no error for CNS claim, got: %v", res.Err)
+	}
+
+	// Verify the podConfigStore was NOT populated (fast path skips it)
+	if _, ok := np.podConfigStore.GetPodConfigs("some-uid"); ok {
+		t.Error("podConfigStore should be empty for CNS fast path")
+	}
+}
+
+func TestPrepareResourceClaims_DRAClaimStillUsesFullPath(t *testing.T) {
+	ctx := context.Background()
+	draPluginRequestsTotal.Reset()
+
+	fakeNetDB := newFakeInventoryDB()
+	np := &NetworkDriver{
+		driverName:     "dra.net",
+		cnsDriverName:  "networking.azure.com",
+		netdb:          fakeNetDB,
+		podConfigStore: NewPodConfigStore(),
+		swiftV2Store:   NewSwiftV2PodConfigStore(),
+	}
+
+	// A dra.net claim with an invalid device should go through the full path and error.
+	draClaim := &resourcev1.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dra-claim",
+			Namespace: "default",
+			UID:       types.UID("dra-claim-uid"),
+		},
+		Status: resourcev1.ResourceClaimStatus{
+			ReservedFor: []resourcev1.ResourceClaimConsumerReference{
+				{APIGroup: "", Resource: "pods", Name: "test-pod", UID: "pod-uid-1"},
+			},
+			Allocation: &resourcev1.AllocationResult{
+				Devices: resourcev1.DeviceAllocationResult{
+					Results: []resourcev1.DeviceRequestAllocationResult{
+						{Driver: "dra.net", Device: "nonexistent-device", Request: "req1"},
+					},
+				},
+			},
+		},
+	}
+
+	result, err := np.PrepareResourceClaims(ctx, []*resourcev1.ResourceClaim{draClaim})
+	if err != nil {
+		t.Fatalf("PrepareResourceClaims failed: %v", err)
+	}
+	// Full path should error because the device doesn't exist in netdb/netlink
+	if result[draClaim.UID].Err == nil {
+		t.Error("expected error for DRA claim with nonexistent device via full path")
+	}
+}
