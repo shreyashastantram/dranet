@@ -1,0 +1,43 @@
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: pod-subnet-shared-rct
+spec:
+  spec:
+    devices:
+      requests:
+        - name: nic
+          firstAvailable:  # KEP-4816: Prioritized list
+            - name: preferred-nic
+              deviceClassName: swift-shared-nic-matching-pod-subnet   # 1st: Try matching subnet
+              count: 1
+              # No capacity specified - uses requestPolicy.default ("1")
+            - name: fallback-nic
+              deviceClassName: swift-shared-nic-pristine   # 2nd: Try pristine NIC
+              count: 1
+      config:
+        - requests: ["nic"]
+          opaque:
+            driver: networking.azure.com
+            parameters:
+              subnet: "pod-subnet"
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: default-dedicated-rct
+spec:
+  spec:
+    devices:
+      requests:
+        - name: nic
+          exactly:
+            deviceClassName: swift-dedicated-nic  # Requires pristine NIC (subnet="")
+            count: 1
+            # No capacity specified - uses requestPolicy.default ("1")
+      config:
+        - requests: ["nic"]
+          opaque:
+            driver: networking.azure.com
+            parameters:
+              dedicated: true  # Tells CNS this is dedicated mode

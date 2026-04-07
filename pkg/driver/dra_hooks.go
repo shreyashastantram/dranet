@@ -51,6 +51,7 @@ const (
 	cnsAttrNIC    = "networking.azure.com/nic"
 	cnsAttrSubnet = "networking.azure.com/subnet"
 	cnsAttrMac    = "networking.azure.com/mac"
+	cnsAttrShared = "networking.azure.com/shared"
 
 	// Consumable capacity key (KEP-5075)
 	cnsCapSlots = "networking.azure.com/slots"
@@ -159,10 +160,12 @@ func (np *NetworkDriver) buildCNSDevices(nic *cnsclient.NICResource) []resourcea
 	subnet := nic.SubnetID
 
 	macAddr := nic.MacAddress
+	allowMultiAttr := true
 	attrs := map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
 		cnsAttrNIC:    {StringValue: &nicName},
 		cnsAttrSubnet: {StringValue: &subnet},
 		cnsAttrMac:    {StringValue: &macAddr},
+		cnsAttrShared: {BoolValue: &allowMultiAttr},
 	}
 
 	// Capacity defaults to 1 (pristine/placeholder); CNS sets blockSize when NICNC exists
@@ -270,9 +273,85 @@ func (np *NetworkDriver) prepareResourceClaims(ctx context.Context, claims []*re
 
 	for _, claim := range claims {
 		klog.V(2).Infof("NodePrepareResources: Claim Request %s/%s", claim.Namespace, claim.Name)
-		result[claim.UID] = np.prepareResourceClaim(ctx, claim)
+		if np.isCNSClaim(claim) {
+			result[claim.UID] = np.prepareCNSResourceClaim(ctx, claim)
+		} else {
+			result[claim.UID] = np.prepareResourceClaim(ctx, claim)
+		}
 	}
 	return result, nil
+}
+
+// isCNSClaim returns true if the claim has any device results managed by the CNS driver.
+func (np *NetworkDriver) isCNSClaim(claim *resourceapi.ResourceClaim) bool {
+	if np.cnsDriverName == "" || claim.Status.Allocation == nil {
+		return false
+	}
+	for _, result := range claim.Status.Allocation.Devices.Results {
+		if result.Driver == np.cnsDriverName {
+			return true
+		}
+	}
+	return false
+}
+
+// prepareCNSResourceClaim is the fast path for Swift v2 CNS-managed claims.
+// It only resolves the MAC address for each allocated NIC and populates the
+// SwiftV2 store with the CNS goal state. All heavy DRA work (routes, rules,
+// DHCP, ethtool, RDMA, eBPF) is skipped because the NRI hook
+// (runPodSandboxSwiftV2) handles network plumbing from CNS goal state.
+func (np *NetworkDriver) prepareCNSResourceClaim(ctx context.Context, claim *resourceapi.ResourceClaim) kubeletplugin.PrepareResult {
+	klog.V(2).Infof("prepareCNSResourceClaim Claim %s/%s (fast path)", claim.Namespace, claim.Name)
+	start := time.Now()
+	defer func() {
+		klog.V(2).Infof("prepareCNSResourceClaim Claim %s/%s took %v", claim.Namespace, claim.Name, time.Since(start))
+	}()
+
+	podConsumers := getPodConsumers(claim)
+	if len(podConsumers) == 0 {
+		klog.Infof("no pods allocated to CNS claim %s/%s", claim.Namespace, claim.Name)
+		return kubeletplugin.PrepareResult{}
+	}
+
+	nlHandle, err := nlwrap.NewHandle()
+	if err != nil {
+		return kubeletplugin.PrepareResult{
+			Err: fmt.Errorf("error creating netlink handle: %w", err),
+		}
+	}
+
+	var errorList []error
+	goalStateByPod := map[types.UID][]cnsclient.PodIPInfo{}
+
+	for _, result := range claim.Status.Allocation.Devices.Results {
+		if result.Driver != np.cnsDriverName {
+			continue
+		}
+
+		// The device name is the NIC interface name (e.g., "eth1").
+		// We need the MAC address to match against CNS goal state.
+		deviceName := result.Device
+		link, err := nlHandle.LinkByName(deviceName)
+		if err != nil {
+			errorList = append(errorList, fmt.Errorf("failed to get netlink for CNS device %s: %w", deviceName, err))
+			continue
+		}
+		deviceMAC := link.Attrs().HardwareAddr.String()
+
+		for _, pod := range podConsumers {
+			if err := np.populateSwiftV2StoreForDevice(ctx, pod, deviceName, deviceMAC, goalStateByPod); err != nil {
+				errorList = append(errorList, err)
+			}
+		}
+	}
+
+	if len(errorList) > 0 {
+		klog.Infof("CNS claim %s contain errors: %v", claim.UID, errors.Join(errorList...))
+		return kubeletplugin.PrepareResult{
+			Err: fmt.Errorf("CNS claim %s contain errors: %w", claim.UID, errors.Join(errorList...)),
+		}
+	}
+	return kubeletplugin.PrepareResult{}
 }
 
 // prepareResourceClaim gets all the configuration required to be applied at runtime and passes it downs to the handlers.
@@ -313,7 +392,6 @@ func (np *NetworkDriver) prepareResourceClaim(ctx context.Context, claim *resour
 
 	var errorList []error
 	charDevices := sets.New[string]()
-	goalStateByPod := map[types.UID][]cnsclient.PodIPInfo{}
 	for _, result := range claim.Status.Allocation.Devices.Results {
 		// A single ResourceClaim can have devices managed by distinct DRA
 		// drivers. One common use case for this is device topology alignment
@@ -514,14 +592,6 @@ func (np *NetworkDriver) prepareResourceClaim(ctx context.Context, claim *resour
 		// we'll create the subinterface here
 		for _, uid := range podUIDs {
 			np.podConfigStore.Set(uid, result.Device, podCfg)
-		}
-		if np.cnsClient != nil {
-			deviceMAC := link.Attrs().HardwareAddr.String()
-			for _, pod := range podConsumers {
-				if err := np.populateSwiftV2StoreForDevice(ctx, pod, result.Device, deviceMAC, goalStateByPod); err != nil {
-					errorList = append(errorList, err)
-				}
-			}
 		}
 		klog.V(4).Infof("Claim Resources for pods %v : %#v", podUIDs, podCfg)
 	}

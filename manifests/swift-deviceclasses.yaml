@@ -1,0 +1,35 @@
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: swift-shared-nic-matching-pod-subnet
+spec:
+  selectors:
+    - cel:
+        expression: >
+          device.driver == "networking.azure.com" &&
+          device.attributes["networking.azure.com"].shared == true &&
+          device.attributes["networking.azure.com"].subnet == "pod-subnet"
+---
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: swift-shared-nic-pristine
+spec:
+  selectors:
+    - cel:
+        expression: >
+          device.driver == "networking.azure.com" &&
+          device.attributes["networking.azure.com"].shared == true &&
+          device.attributes["networking.azure.com"].subnet == ""
+---
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: swift-dedicated-nic
+spec:
+  selectors:
+    - cel:
+        expression: >
+          device.driver == "networking.azure.com" &&
+          device.attributes["networking.azure.com"].shared == true &&
+          device.attributes["networking.azure.com"].subnet == ""
