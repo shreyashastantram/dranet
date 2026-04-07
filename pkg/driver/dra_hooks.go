@@ -121,21 +121,15 @@ func (np *NetworkDriver) publishCNSResources(ctx context.Context) error {
 	}
 	klog.V(3).Infof("Got %d NIC resources from CNS", len(nicResources))
 
-	pools := make(map[string]resourceslice.Pool, len(nicResources))
+	var devices []resourceapi.Device
 	for i := range nicResources {
-		nic := &nicResources[i]
-		// Use NIC name as pool name when available, then interface name, then MAC
-		poolName := nic.Name
-		if poolName == "" {
-			poolName = nic.InterfaceName
-		}
-		if poolName == "" {
-			poolName = sanitizeMACForK8s(nic.MacAddress)
-		}
-		devices := np.buildCNSDevices(nic)
-		pools[poolName] = resourceslice.Pool{
+		devices = append(devices, np.buildCNSDevices(&nicResources[i])...)
+	}
+
+	pools := map[string]resourceslice.Pool{
+		"swift-nics": {
 			Slices: []resourceslice.Slice{{Devices: devices}},
-		}
+		},
 	}
 
 	return np.publishCNSPools(ctx, pools)
@@ -163,9 +157,11 @@ func (np *NetworkDriver) buildCNSDevices(nic *cnsclient.NICResource) []resourcea
 	// networking.azure.com/subnet = subnet ID (empty "" for pristine/placeholder)
 	subnet := nic.SubnetID
 
+	macAddr := nic.MacAddress
 	attrs := map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
 		cnsAttrNIC:    {StringValue: &nicName},
 		cnsAttrSubnet: {StringValue: &subnet},
+		apis.AttrMac:  {StringValue: &macAddr},
 	}
 
 	// Capacity defaults to 1 (pristine/placeholder); CNS sets blockSize when NICNC exists

@@ -124,7 +124,7 @@ spec:
         - /dranet
         - --v=4
         - --hostname-override=$(NODE_NAME)
-        image: acndev.azurecr.io/dranet:v20260406-0fefc69
+        image: acndev.azurecr.io/dranet:v20260407-a21649f
         env:
         - name: NODE_NAME
           valueFrom:
