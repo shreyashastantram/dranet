@@ -50,6 +50,7 @@ const (
 	// CNS NIC resource attribute keys (per dra.pdf ResourceSlice spec)
 	cnsAttrNIC    = "networking.azure.com/nic"
 	cnsAttrSubnet = "networking.azure.com/subnet"
+	cnsAttrMac    = "networking.azure.com/mac"
 
 	// Consumable capacity key (KEP-5075)
 	cnsCapSlots = "networking.azure.com/slots"
@@ -161,7 +162,7 @@ func (np *NetworkDriver) buildCNSDevices(nic *cnsclient.NICResource) []resourcea
 	attrs := map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
 		cnsAttrNIC:    {StringValue: &nicName},
 		cnsAttrSubnet: {StringValue: &subnet},
-		apis.AttrMac:  {StringValue: &macAddr},
+		cnsAttrMac:    {StringValue: &macAddr},
 	}
 
 	// Capacity defaults to 1 (pristine/placeholder); CNS sets blockSize when NICNC exists
