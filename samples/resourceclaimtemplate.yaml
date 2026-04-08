@@ -1,0 +1,33 @@
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"resource.k8s.io/v1","kind":"ResourceClaimTemplate","metadata":{"annotations":{},"name":"pod-subnet-shared-rct","namespace":"default"},"spec":{"spec":{"devices":{"config":[{"opaque":{"driver":"networking.azure.com","parameters":{"subnet":"pod-subnet"}},"requests":["nic"]}],"requests":[{"firstAvailable":[{"count":1,"deviceClassName":"swift-shared-nic-matching-pod-subnet","name":"preferred-nic"},{"count":1,"deviceClassName":"swift-shared-nic-pristine","name":"fallback-nic"}],"name":"nic"}]}}}}
+  creationTimestamp: "2026-04-07T22:15:16Z"
+  name: pod-subnet-shared-rct
+  namespace: default
+  resourceVersion: "2797475"
+  uid: f720058b-a0bd-479f-a34c-271982cc153c
+spec:
+  metadata: {}
+  spec:
+    devices:
+      config:
+      - opaque:
+          driver: networking.azure.com
+          parameters:
+            subnet: pod-subnet
+        requests:
+        - nic
+      requests:
+      - firstAvailable:
+        - allocationMode: ExactCount
+          count: 1
+          deviceClassName: swift-shared-nic-matching-pod-subnet
+          name: preferred-nic
+        - allocationMode: ExactCount
+          count: 1
+          deviceClassName: swift-shared-nic-pristine
+          name: fallback-nic
+        name: nic
