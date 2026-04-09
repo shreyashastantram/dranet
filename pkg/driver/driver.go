@@ -21,10 +21,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/google/cel-go/cel"
 	"sigs.k8s.io/dranet/pkg/apis"
+	"sigs.k8s.io/dranet/pkg/cnsclient"
 	"sigs.k8s.io/dranet/pkg/inventory"
 
 	"github.com/containerd/nri/pkg/stub"
@@ -81,6 +83,13 @@ func WithInventory(db inventoryDB) Option {
 	}
 }
 
+// WithCNSClient sets the CNS HTTP client for Azure NIC resource discovery.
+func WithCNSClient(client *cnsclient.Client) Option {
+	return func(o *NetworkDriver) {
+		o.cnsClient = client
+	}
+}
+
 type NetworkDriver struct {
 	driverName string
 	nodeName   string
@@ -92,9 +101,20 @@ type NetworkDriver struct {
 	netdb      inventoryDB
 	celProgram cel.Program
 
+	// CNS client for Azure NIC resource discovery
+	cnsClient *cnsclient.Client
+
+	// mu protects inventoryPools and cnsPools for concurrent publishing
+	mu             sync.Mutex
+	inventoryPools map[string]resourceslice.Pool
+	cnsPools       map[string]resourceslice.Pool
+
 	// Cache the rdma shared mode state
 	rdmaSharedMode bool
 	podConfigStore *PodConfigStore
+	// SwiftV2-specific pod config store for NRI plugin lookups.
+	// Populated during PrepareResourceClaims, read during NRI RunPodSandbox.
+	swiftV2Store *SwiftV2PodConfigStore
 }
 
 type Option func(*NetworkDriver)
@@ -116,6 +136,7 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 		kubeClient:     kubeClient,
 		rdmaSharedMode: rdmaNetnsMode == apis.RdmaNetnsModeShared,
 		podConfigStore: NewPodConfigStore(),
+		swiftV2Store:   NewSwiftV2PodConfigStore(),
 	}
 
 	for _, o := range opts {
@@ -203,6 +224,11 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 
 	// publish available resources
 	go plugin.PublishResources(ctx)
+
+	// publish CNS NIC resources if CNS client is configured
+	if plugin.cnsClient != nil {
+		go plugin.PublishCNSResources(ctx)
+	}
 
 	return plugin, nil
 }

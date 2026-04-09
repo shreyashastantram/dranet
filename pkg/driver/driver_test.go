@@ -39,12 +39,14 @@ func (m *fakePluginHelper) RegistrationStatus() *registerapi.RegistrationStatus 
 type fakeInventoryDB struct {
 	resources chan []resourcev1.Device
 	podNetNs  map[string]string
+	ifNames   map[string]string
 }
 
 func newFakeInventoryDB() *fakeInventoryDB {
 	return &fakeInventoryDB{
 		resources: make(chan []resourcev1.Device, 1),
 		podNetNs:  make(map[string]string),
+		ifNames:   make(map[string]string),
 	}
 }
 
@@ -54,7 +56,13 @@ func (m *fakeInventoryDB) GetResources(_ context.Context) <-chan []resourcev1.De
 	return m.resources
 }
 
-func (m *fakeInventoryDB) GetNetInterfaceName(_ string) (string, error) { return "", nil }
+func (m *fakeInventoryDB) GetNetInterfaceName(deviceName string) (string, error) {
+	return m.ifNames[deviceName], nil
+}
+
+func (m *fakeInventoryDB) SetNetInterfaceName(deviceName string, ifName string) {
+	m.ifNames[deviceName] = ifName
+}
 
 func (m *fakeInventoryDB) AddPodNetNs(podKey string, netNs string) {
 	m.podNetNs[podKey] = netNs
