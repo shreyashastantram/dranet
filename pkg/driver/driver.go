@@ -113,9 +113,10 @@ type NetworkDriver struct {
 	// CNS client for Azure NIC resource discovery
 	cnsClient *cnsclient.Client
 
-	// mu protects inventoryPools for concurrent publishing
+	// mu protects inventoryPools and lastCNSNICs for concurrent publishing
 	mu             sync.Mutex
 	inventoryPools map[string]resourceslice.Pool
+	lastCNSNICs    []cnsclient.NICResource
 
 	// Cache the rdma shared mode state
 	rdmaSharedMode bool
@@ -232,7 +233,7 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 	}()
 
 	// publish available resources
-	go plugin.PublishResources(ctx)
+	// go plugin.PublishResources(ctx)
 
 	// Start a separate kubelet plugin for CNS resources if configured
 	if plugin.cnsClient != nil && plugin.cnsDriverName != "" {

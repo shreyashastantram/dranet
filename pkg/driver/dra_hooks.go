@@ -123,9 +123,19 @@ func (np *NetworkDriver) publishCNSResources(ctx context.Context) error {
 	}
 	klog.V(3).Infof("Got %d NIC resources from CNS", len(nicResources))
 
+	np.mu.Lock()
+	prev := np.lastCNSNICs
+	np.lastCNSNICs = nicResources
+	np.mu.Unlock()
+
+	logCNSNICChanges(prev, nicResources)
+
 	var devices []resourceapi.Device
 	for i := range nicResources {
-		devices = append(devices, np.buildCNSDevices(&nicResources[i])...)
+		nic := &nicResources[i]
+		klog.V(3).Infof("CNS NIC[%d]: Name=%q InterfaceName=%q MacAddress=%q VMUniqueID=%q NetworkID=%q SubnetName=%q SubnetID=%q Capacity=%d",
+			i, nic.Name, nic.InterfaceName, nic.MacAddress, nic.VMUniqueID, nic.NetworkID, nic.SubnetName, nic.SubnetID, nic.Capacity)
+		devices = append(devices, np.buildCNSDevices(nic)...)
 	}
 
 	pools := map[string]resourceslice.Pool{
@@ -135,6 +145,82 @@ func (np *NetworkDriver) publishCNSResources(ctx context.Context) error {
 	}
 
 	return np.publishCNSPools(ctx, pools)
+}
+
+// logCNSNICChanges compares the previous and current NIC resource lists from
+// CNS and logs any additions, removals, or field-level changes.
+func logCNSNICChanges(prev, curr []cnsclient.NICResource) {
+	if prev == nil {
+		klog.V(2).Infof("CNS ResourceSlice: initial publish with %d NIC(s)", len(curr))
+		return
+	}
+
+	prevByMAC := make(map[string]cnsclient.NICResource, len(prev))
+	for _, n := range prev {
+		prevByMAC[n.MacAddress] = n
+	}
+	currByMAC := make(map[string]cnsclient.NICResource, len(curr))
+	for _, n := range curr {
+		currByMAC[n.MacAddress] = n
+	}
+
+	changed := false
+
+	// Detect additions
+	for mac, n := range currByMAC {
+		if _, ok := prevByMAC[mac]; !ok {
+			changed = true
+			klog.Infof("CNS ResourceSlice ADDED NIC: Name=%q InterfaceName=%q MAC=%q VMUniqueID=%q NetworkID=%q SubnetName=%q SubnetID=%q Capacity=%d",
+				n.Name, n.InterfaceName, n.MacAddress, n.VMUniqueID, n.NetworkID, n.SubnetName, n.SubnetID, n.Capacity)
+		}
+	}
+
+	// Detect removals
+	for mac, n := range prevByMAC {
+		if _, ok := currByMAC[mac]; !ok {
+			changed = true
+			klog.Infof("CNS ResourceSlice REMOVED NIC: Name=%q InterfaceName=%q MAC=%q VMUniqueID=%q NetworkID=%q SubnetName=%q SubnetID=%q Capacity=%d",
+				n.Name, n.InterfaceName, n.MacAddress, n.VMUniqueID, n.NetworkID, n.SubnetName, n.SubnetID, n.Capacity)
+		}
+	}
+
+	// Detect field changes on existing NICs
+	for mac, c := range currByMAC {
+		p, ok := prevByMAC[mac]
+		if !ok {
+			continue
+		}
+		var diffs []string
+		if p.Name != c.Name {
+			diffs = append(diffs, fmt.Sprintf("Name: %q -> %q", p.Name, c.Name))
+		}
+		if p.InterfaceName != c.InterfaceName {
+			diffs = append(diffs, fmt.Sprintf("InterfaceName: %q -> %q", p.InterfaceName, c.InterfaceName))
+		}
+		if p.VMUniqueID != c.VMUniqueID {
+			diffs = append(diffs, fmt.Sprintf("VMUniqueID: %q -> %q", p.VMUniqueID, c.VMUniqueID))
+		}
+		if p.NetworkID != c.NetworkID {
+			diffs = append(diffs, fmt.Sprintf("NetworkID: %q -> %q", p.NetworkID, c.NetworkID))
+		}
+		if p.SubnetName != c.SubnetName {
+			diffs = append(diffs, fmt.Sprintf("SubnetName: %q -> %q", p.SubnetName, c.SubnetName))
+		}
+		if p.SubnetID != c.SubnetID {
+			diffs = append(diffs, fmt.Sprintf("SubnetID: %q -> %q", p.SubnetID, c.SubnetID))
+		}
+		if p.Capacity != c.Capacity {
+			diffs = append(diffs, fmt.Sprintf("Capacity: %d -> %d", p.Capacity, c.Capacity))
+		}
+		if len(diffs) > 0 {
+			changed = true
+			klog.Infof("CNS ResourceSlice CHANGED NIC MAC=%q: %s", mac, strings.Join(diffs, ", "))
+		}
+	}
+
+	if !changed {
+		klog.V(4).Infof("CNS ResourceSlice: no changes (%d NICs)", len(curr))
+	}
 }
 
 // buildCNSDevices converts a single CNS NICResource into a DRA Device
