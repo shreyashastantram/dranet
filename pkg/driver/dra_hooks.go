@@ -231,14 +231,7 @@ func logCNSNICChanges(prev, curr []cnsclient.NICResource) {
 //   - attributes: networking.azure.com/nic (NIC name), networking.azure.com/subnet (empty="" for pristine)
 //   - capacity: networking.azure.com/slots with requestPolicy default=1, validRange min=1 max=1
 func (np *NetworkDriver) buildCNSDevices(nic *cnsclient.NICResource) []resourceapi.Device {
-	// Device name: NIC name > interface name > sanitized MAC
-	deviceName := nic.Name
-	if deviceName == "" {
-		deviceName = nic.InterfaceName
-	}
-	if deviceName == "" {
-		deviceName = sanitizeMACForK8s(nic.MacAddress)
-	}
+	deviceName := cnsNICDeviceName(nic)
 
 	// networking.azure.com/nic = NIC name (e.g., "eth1")
 	nicName := deviceName
@@ -358,8 +351,19 @@ func (np *NetworkDriver) prepareResourceClaims(ctx context.Context, claims []*re
 	result := make(map[types.UID]kubeletplugin.PrepareResult)
 
 	for _, claim := range claims {
-		klog.V(2).Infof("NodePrepareResources: Claim Request %s/%s", claim.Namespace, claim.Name)
-		if np.isCNSClaim(claim) {
+		isCNS := np.isCNSClaim(claim)
+		klog.Infof("NodePrepareResources: Claim %s/%s UID=%s isCNS=%v cnsDriverName=%q allocatedDevices=%d reservedFor=%d",
+			claim.Namespace, claim.Name, claim.UID, isCNS, np.cnsDriverName,
+			len(claim.Status.Allocation.Devices.Results), len(claim.Status.ReservedFor))
+		for i, result := range claim.Status.Allocation.Devices.Results {
+			klog.Infof("  Claim %s/%s DeviceResult[%d]: Driver=%q Pool=%q Device=%q Request=%q",
+				claim.Namespace, claim.Name, i, result.Driver, result.Pool, result.Device, result.Request)
+		}
+		for i, ref := range claim.Status.ReservedFor {
+			klog.Infof("  Claim %s/%s ReservedFor[%d]: Resource=%q Name=%q UID=%s",
+				claim.Namespace, claim.Name, i, ref.Resource, ref.Name, ref.UID)
+		}
+		if isCNS {
 			result[claim.UID] = np.prepareCNSResourceClaim(ctx, claim)
 		} else {
 			result[claim.UID] = np.prepareResourceClaim(ctx, claim)
@@ -370,22 +374,32 @@ func (np *NetworkDriver) prepareResourceClaims(ctx context.Context, claims []*re
 
 // isCNSClaim returns true if the claim has any device results managed by the CNS driver.
 func (np *NetworkDriver) isCNSClaim(claim *resourceapi.ResourceClaim) bool {
-	if np.cnsDriverName == "" || claim.Status.Allocation == nil {
+	if np.cnsDriverName == "" {
+		klog.V(4).Infof("isCNSClaim: cnsDriverName is empty, returning false for claim %s/%s", claim.Namespace, claim.Name)
+		return false
+	}
+	if claim.Status.Allocation == nil {
+		klog.V(4).Infof("isCNSClaim: allocation is nil for claim %s/%s", claim.Namespace, claim.Name)
 		return false
 	}
 	for _, result := range claim.Status.Allocation.Devices.Results {
 		if result.Driver == np.cnsDriverName {
+			klog.V(4).Infof("isCNSClaim: matched CNS driver %q on device %q for claim %s/%s",
+				result.Driver, result.Device, claim.Namespace, claim.Name)
 			return true
 		}
 	}
+	klog.V(4).Infof("isCNSClaim: no device matched cnsDriverName=%q for claim %s/%s", np.cnsDriverName, claim.Namespace, claim.Name)
 	return false
 }
 
 // prepareCNSResourceClaim is the fast path for Swift v2 CNS-managed claims.
-// It only resolves the MAC address for each allocated NIC and populates the
-// SwiftV2 store with the CNS goal state. All heavy DRA work (routes, rules,
-// DHCP, ethtool, RDMA, eBPF) is skipped because the NRI hook
-// (runPodSandboxSwiftV2) handles network plumbing from CNS goal state.
+// It reads NIC state from CNS (GetNICResources) to resolve the MAC address
+// for each allocated NIC, queries CNS GetPodGoalState for per-pod networking
+// config, and populates the SwiftV2PodConfigStore for downstream NRI use.
+// All heavy DRA work (routes, rules, DHCP, ethtool, RDMA, eBPF) is skipped
+// because the NRI hook (runPodSandboxSwiftV2) handles network plumbing from
+// CNS goal state.
 func (np *NetworkDriver) prepareCNSResourceClaim(ctx context.Context, claim *resourceapi.ResourceClaim) kubeletplugin.PrepareResult {
 	klog.V(2).Infof("prepareCNSResourceClaim Claim %s/%s (fast path)", claim.Namespace, claim.Name)
 	start := time.Now()
@@ -394,38 +408,77 @@ func (np *NetworkDriver) prepareCNSResourceClaim(ctx context.Context, claim *res
 	}()
 
 	podConsumers := getPodConsumers(claim)
+	klog.Infof("prepareCNSResourceClaim: claim %s/%s has %d pod consumers", claim.Namespace, claim.Name, len(podConsumers))
+	for i, pod := range podConsumers {
+		klog.Infof("prepareCNSResourceClaim: consumer[%d] pod=%s/%s UID=%s", i, pod.Namespace, pod.Name, pod.UID)
+	}
 	if len(podConsumers) == 0 {
 		klog.Infof("no pods allocated to CNS claim %s/%s", claim.Namespace, claim.Name)
 		return kubeletplugin.PrepareResult{}
 	}
 
-	nlHandle, err := nlwrap.NewHandle()
-	if err != nil {
+	// Read NIC state from CNS — this is the source of truth for NIC
+	// metadata (MAC, subnet, capacity). If CNS is unreachable the pod
+	// stays Pending and kubelet retries.
+	if np.cnsClient == nil {
 		return kubeletplugin.PrepareResult{
-			Err: fmt.Errorf("error creating netlink handle: %w", err),
+			Err: fmt.Errorf("CNS client not configured for claim %s/%s", claim.Namespace, claim.Name),
 		}
+	}
+	nicResources, err := np.cnsClient.GetNICResources(ctx)
+	if err != nil {
+		klog.Errorf("prepareCNSResourceClaim: failed to get NIC resources from CNS for claim %s/%s: %v", claim.Namespace, claim.Name, err)
+		return kubeletplugin.PrepareResult{
+			Err: fmt.Errorf("failed to get NIC resources from CNS for claim %s/%s: %w", claim.Namespace, claim.Name, err),
+		}
+	}
+	klog.Infof("prepareCNSResourceClaim: CNS returned %d NIC resources", len(nicResources))
+
+	// Build lookup map from device name → NICResource.
+	// Device names follow the same convention used by buildCNSDevices:
+	// Name > InterfaceName > sanitized MAC.
+	nicByDeviceName := make(map[string]cnsclient.NICResource, len(nicResources))
+	for _, nic := range nicResources {
+		name := cnsNICDeviceName(&nic)
+		nicByDeviceName[name] = nic
+		klog.Infof("prepareCNSResourceClaim: NIC %q MAC=%s InterfaceName=%q SubnetID=%q",
+			name, nic.MacAddress, nic.InterfaceName, nic.SubnetID)
 	}
 
 	var errorList []error
 	goalStateByPod := map[types.UID][]cnsclient.PodIPInfo{}
 
+	klog.Infof("prepareCNSResourceClaim: iterating %d device results for claim %s/%s",
+		len(claim.Status.Allocation.Devices.Results), claim.Namespace, claim.Name)
 	for _, result := range claim.Status.Allocation.Devices.Results {
 		if result.Driver != np.cnsDriverName {
+			klog.V(4).Infof("prepareCNSResourceClaim: skipping device %q (driver=%q, not CNS driver %q)",
+				result.Device, result.Driver, np.cnsDriverName)
 			continue
 		}
 
-		// The device name is the NIC interface name (e.g., "eth1").
-		// We need the MAC address to match against CNS goal state.
+		// Look up the NIC in the CNS NIC state to resolve the MAC address
+		// and confirm the device exists.
 		deviceName := result.Device
-		link, err := nlHandle.LinkByName(deviceName)
-		if err != nil {
-			errorList = append(errorList, fmt.Errorf("failed to get netlink for CNS device %s: %w", deviceName, err))
+		nic, ok := nicByDeviceName[deviceName]
+		if !ok {
+			klog.Errorf("prepareCNSResourceClaim: device %q not found in CNS NIC resources for claim %s/%s",
+				deviceName, claim.Namespace, claim.Name)
+			errorList = append(errorList, fmt.Errorf("CNS NIC resource not found for device %s", deviceName))
 			continue
 		}
-		deviceMAC := link.Attrs().HardwareAddr.String()
+		deviceMAC := nic.MacAddress
+		klog.Infof("prepareCNSResourceClaim: device %q resolved from CNS NIC state: MAC=%q SubnetID=%q SubnetName=%q",
+			deviceName, deviceMAC, nic.SubnetID, nic.SubnetName)
 
+		// Query CNS GetPodGoalState for each pod consumer and store the
+		// per-pod networking config in SwiftV2PodConfigStore for the NRI hook.
 		for _, pod := range podConsumers {
+			klog.Infof("prepareCNSResourceClaim: populating SwiftV2 store for pod %s/%s UID=%s device=%q MAC=%q",
+				pod.Namespace, pod.Name, pod.UID, deviceName, deviceMAC)
 			if err := np.populateSwiftV2StoreForDevice(ctx, pod, deviceName, deviceMAC, goalStateByPod); err != nil {
+				klog.Errorf("prepareCNSResourceClaim: populateSwiftV2StoreForDevice failed for pod %s/%s device %q: %v",
+					pod.Namespace, pod.Name, deviceName, err)
 				errorList = append(errorList, err)
 			}
 		}
@@ -437,7 +490,20 @@ func (np *NetworkDriver) prepareCNSResourceClaim(ctx context.Context, claim *res
 			Err: fmt.Errorf("CNS claim %s contain errors: %w", claim.UID, errors.Join(errorList...)),
 		}
 	}
+	klog.Infof("prepareCNSResourceClaim: claim %s/%s completed successfully", claim.Namespace, claim.Name)
 	return kubeletplugin.PrepareResult{}
+}
+
+// cnsNICDeviceName returns the device name for a CNS NICResource, using the
+// same naming convention as buildCNSDevices: Name > InterfaceName > sanitized MAC.
+func cnsNICDeviceName(nic *cnsclient.NICResource) string {
+	if nic.Name != "" {
+		return nic.Name
+	}
+	if nic.InterfaceName != "" {
+		return nic.InterfaceName
+	}
+	return sanitizeMACForK8s(nic.MacAddress)
 }
 
 // prepareResourceClaim gets all the configuration required to be applied at runtime and passes it downs to the handlers.

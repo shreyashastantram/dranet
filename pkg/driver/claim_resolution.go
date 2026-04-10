@@ -37,9 +37,14 @@ type podConsumer struct {
 }
 
 func getPodConsumers(claim *resourceapi.ResourceClaim) []podConsumer {
+	klog.Infof("getPodConsumers: claim %s/%s UID=%s has %d ReservedFor entries",
+		claim.Namespace, claim.Name, claim.UID, len(claim.Status.ReservedFor))
 	consumers := make([]podConsumer, 0, len(claim.Status.ReservedFor))
-	for _, reserved := range claim.Status.ReservedFor {
+	for i, reserved := range claim.Status.ReservedFor {
+		klog.Infof("getPodConsumers: ReservedFor[%d]: Resource=%q APIGroup=%q Name=%q UID=%s",
+			i, reserved.Resource, reserved.APIGroup, reserved.Name, reserved.UID)
 		if reserved.Resource != "pods" || reserved.APIGroup != "" {
+			klog.Infof("getPodConsumers: skipping ReservedFor[%d] (not a pod)", i)
 			continue
 		}
 		consumers = append(consumers, podConsumer{
@@ -48,17 +53,29 @@ func getPodConsumers(claim *resourceapi.ResourceClaim) []podConsumer {
 			Namespace: claim.Namespace,
 		})
 	}
+	klog.Infof("getPodConsumers: returning %d pod consumers for claim %s/%s", len(consumers), claim.Namespace, claim.Name)
 	return consumers
 }
 
 func (np *NetworkDriver) getPodGoalState(ctx context.Context, pod podConsumer, cache map[types.UID][]cnsclient.PodIPInfo) ([]cnsclient.PodIPInfo, error) {
 	if infos, ok := cache[pod.UID]; ok {
+		klog.Infof("getPodGoalState: cache hit for pod %s/%s UID=%s (%d infos)", pod.Namespace, pod.Name, pod.UID, len(infos))
 		return infos, nil
 	}
 
+	klog.Infof("getPodGoalState: calling CNS for pod %s/%s UID=%s", pod.Namespace, pod.Name, pod.UID)
 	infos, err := np.cnsClient.GetPodGoalState(ctx, pod.Name, pod.Namespace)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get CNS goal state for pod %s/%s: %w", pod.Namespace, pod.Name, err)
+	}
+	klog.Infof("getPodGoalState: CNS returned %d PodIPInfo entries for pod %s/%s", len(infos), pod.Namespace, pod.Name)
+	for i, info := range infos {
+		klog.Infof("getPodGoalState: PodIPInfo[%d]: NICType=%q MAC=%q InterfaceName=%q PodIP=%s/%d PrimaryIP=%s GW=%s SharedNIC=%v",
+			i, info.NICType, info.MacAddress, info.InterfaceName,
+			info.PodIPConfig.IPAddress, info.PodIPConfig.PrefixLength,
+			info.NetworkContainerPrimaryIPConfig.PrimaryIP,
+			info.NetworkContainerPrimaryIPConfig.GatewayIPAddress,
+			info.SharedNIC)
 	}
 	cache[pod.UID] = infos
 	return infos, nil
@@ -66,20 +83,31 @@ func (np *NetworkDriver) getPodGoalState(ctx context.Context, pod podConsumer, c
 
 func (np *NetworkDriver) populateSwiftV2StoreForDevice(ctx context.Context, pod podConsumer, deviceName, deviceMAC string, cache map[types.UID][]cnsclient.PodIPInfo) error {
 	if np.cnsClient == nil {
+		klog.Infof("populateSwiftV2StoreForDevice: cnsClient is nil, skipping for pod %s/%s device %s", pod.Namespace, pod.Name, deviceName)
 		return nil
 	}
 
+	klog.Infof("populateSwiftV2StoreForDevice: fetching goal state for pod %s/%s device=%q MAC=%q", pod.Namespace, pod.Name, deviceName, deviceMAC)
 	infos, err := np.getPodGoalState(ctx, pod, cache)
 	if err != nil {
 		return err
 	}
 
+	klog.Infof("populateSwiftV2StoreForDevice: matching MAC=%q against %d CNS PodIPInfo entries", deviceMAC, len(infos))
+	for i, info := range infos {
+		klog.Infof("populateSwiftV2StoreForDevice: candidate[%d] MAC=%q NICType=%q InterfaceName=%q",
+			i, info.MacAddress, info.NICType, info.InterfaceName)
+	}
+
 	info, found := findPodIPInfoByMAC(infos, deviceMAC)
 	if !found {
-		klog.V(4).Infof("SwiftV2 PrepareResourceClaim: no CNS goal state matched pod %s/%s device %s MAC %s",
+		klog.Infof("populateSwiftV2StoreForDevice: no CNS goal state matched pod %s/%s device %s MAC %s",
 			pod.Namespace, pod.Name, deviceName, deviceMAC)
 		return nil
 	}
+	klog.Infof("populateSwiftV2StoreForDevice: matched MAC=%q -> NICType=%q PodIP=%s/%d GW=%s",
+		deviceMAC, info.NICType, info.PodIPConfig.IPAddress, info.PodIPConfig.PrefixLength,
+		info.NetworkContainerPrimaryIPConfig.GatewayIPAddress)
 
 	cfg, err := buildSwiftV2PodConfig(pod.UID, info)
 	if err != nil {
@@ -90,6 +118,7 @@ func (np *NetworkDriver) populateSwiftV2StoreForDevice(ctx context.Context, pod 
 		np.swiftV2Store = NewSwiftV2PodConfigStore()
 	}
 	np.swiftV2Store.Set(pod.UID, deviceName, cfg)
+	klog.Infof("populateSwiftV2StoreForDevice: stored SwiftV2 config for pod %s/%s UID=%s device=%q", pod.Namespace, pod.Name, pod.UID, deviceName)
 	return nil
 }
 

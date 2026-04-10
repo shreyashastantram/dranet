@@ -187,8 +187,6 @@ func TestIntegration_PrepareResourceClaims_PopulatesSwiftV2Store(t *testing.T) {
 }
 
 func TestIntegration_PrepareCNSResourceClaim_FastPath(t *testing.T) {
-	skipIfNotRoot(t)
-
 	testCases := []struct {
 		name          string
 		podIPInfo     cnsclient.PodIPInfo
@@ -217,16 +215,32 @@ func TestIntegration_PrepareCNSResourceClaim_FastPath(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			ifaceName := "cns" + tc.name[:3] + "0"
-			deviceMAC := testDummyNIC(t, ifaceName)
+			// NIC state comes from CNS, not netlink — no root required.
+			deviceName := "cns-nic-" + tc.name[:3]
+			deviceMAC := "aa:bb:cc:dd:ee:42"
 
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				resp := tc.podIPInfo
-				resp.MacAddress = deviceMAC
-				_ = json.NewEncoder(w).Encode(cnsclient.IPConfigsResponse{
-					Response:  cnsclient.Response{ReturnCode: 0},
-					PodIPInfo: []cnsclient.PodIPInfo{resp},
-				})
+				switch r.URL.Path {
+				case "/network/nicresources":
+					_ = json.NewEncoder(w).Encode(cnsclient.GetNICResourcesResponse{
+						Response: cnsclient.Response{ReturnCode: 0},
+						NICResources: []cnsclient.NICResource{{
+							Name:       deviceName,
+							MacAddress: deviceMAC,
+							SubnetID:   "/subscriptions/sub1/subnets/sn1",
+							SubnetName: "sn1",
+						}},
+					})
+				case "/network/requestipconfigs":
+					resp := tc.podIPInfo
+					resp.MacAddress = deviceMAC
+					_ = json.NewEncoder(w).Encode(cnsclient.IPConfigsResponse{
+						Response:  cnsclient.Response{ReturnCode: 0},
+						PodIPInfo: []cnsclient.PodIPInfo{resp},
+					})
+				default:
+					http.NotFound(w, r)
+				}
 			}))
 			defer server.Close()
 
@@ -261,7 +275,7 @@ func TestIntegration_PrepareCNSResourceClaim_FastPath(t *testing.T) {
 						Devices: resourcev1.DeviceAllocationResult{
 							Results: []resourcev1.DeviceRequestAllocationResult{{
 								Driver:  "networking.azure.com",
-								Device:  ifaceName,
+								Device:  deviceName,
 								Request: "nic",
 							}},
 						},
@@ -287,9 +301,9 @@ func TestIntegration_PrepareCNSResourceClaim_FastPath(t *testing.T) {
 			if swiftCfgs == nil {
 				t.Fatal("expected SwiftV2 store entry")
 			}
-			swiftCfg, ok := swiftCfgs[ifaceName]
+			swiftCfg, ok := swiftCfgs[deviceName]
 			if !ok {
-				t.Fatalf("expected SwiftV2 device config for %s", ifaceName)
+				t.Fatalf("expected SwiftV2 device config for %s", deviceName)
 			}
 			if swiftCfg.Mode != tc.expectedMode {
 				t.Fatalf("expected mode %s, got %s", tc.expectedMode, swiftCfg.Mode)

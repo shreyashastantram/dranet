@@ -18,7 +18,10 @@ package driver
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -28,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"sigs.k8s.io/dranet/pkg/apis"
+	"sigs.k8s.io/dranet/pkg/cnsclient"
 )
 
 func TestPublishResourcesPrometheusMetrics(t *testing.T) {
@@ -412,6 +416,115 @@ func TestPrepareResourceClaims_RoutesCNSClaimToFastPath(t *testing.T) {
 	// Verify the podConfigStore was NOT populated (fast path skips it)
 	if _, ok := np.podConfigStore.GetPodConfigs("some-uid"); ok {
 		t.Error("podConfigStore should be empty for CNS fast path")
+	}
+}
+
+func TestPrepareResourceClaims_CNSFastPathNICNotFound(t *testing.T) {
+	ctx := context.Background()
+	draPluginRequestsTotal.Reset()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/network/nicresources":
+			// Return a NIC resource that does NOT match the device name in the claim.
+			_ = json.NewEncoder(w).Encode(cnsclient.GetNICResourcesResponse{
+				Response:     cnsclient.Response{ReturnCode: 0},
+				NICResources: []cnsclient.NICResource{{Name: "other-nic", MacAddress: "aa:bb:cc:dd:ee:99"}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := cnsclient.New(server.URL, 0)
+	if err != nil {
+		t.Fatalf("failed to create CNS client: %v", err)
+	}
+
+	np := &NetworkDriver{
+		driverName:     "dra.net",
+		cnsDriverName:  "networking.azure.com",
+		netdb:          newFakeInventoryDB(),
+		cnsClient:      client,
+		podConfigStore: NewPodConfigStore(),
+		swiftV2Store:   NewSwiftV2PodConfigStore(),
+	}
+
+	cnsClaim := &resourcev1.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cns-claim",
+			Namespace: "default",
+			UID:       types.UID("cns-claim-uid"),
+		},
+		Status: resourcev1.ResourceClaimStatus{
+			ReservedFor: []resourcev1.ResourceClaimConsumerReference{
+				{APIGroup: "", Resource: "pods", Name: "test-pod", UID: "pod-uid-1"},
+			},
+			Allocation: &resourcev1.AllocationResult{
+				Devices: resourcev1.DeviceAllocationResult{
+					Results: []resourcev1.DeviceRequestAllocationResult{
+						{Driver: "networking.azure.com", Device: "eth1", Request: "nic"},
+					},
+				},
+			},
+		},
+	}
+
+	result, err := np.PrepareResourceClaims(ctx, []*resourcev1.ResourceClaim{cnsClaim})
+	if err != nil {
+		t.Fatalf("PrepareResourceClaims failed: %v", err)
+	}
+	if result[cnsClaim.UID].Err == nil {
+		t.Error("expected error when CNS NIC resource not found for device")
+	}
+	if !strings.Contains(result[cnsClaim.UID].Err.Error(), "CNS NIC resource not found") {
+		t.Errorf("unexpected error message: %v", result[cnsClaim.UID].Err)
+	}
+}
+
+func TestPrepareResourceClaims_CNSFastPathNilClient(t *testing.T) {
+	ctx := context.Background()
+	draPluginRequestsTotal.Reset()
+
+	np := &NetworkDriver{
+		driverName:     "dra.net",
+		cnsDriverName:  "networking.azure.com",
+		netdb:          newFakeInventoryDB(),
+		cnsClient:      nil, // no CNS client
+		podConfigStore: NewPodConfigStore(),
+		swiftV2Store:   NewSwiftV2PodConfigStore(),
+	}
+
+	cnsClaim := &resourcev1.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cns-claim",
+			Namespace: "default",
+			UID:       types.UID("cns-claim-uid"),
+		},
+		Status: resourcev1.ResourceClaimStatus{
+			ReservedFor: []resourcev1.ResourceClaimConsumerReference{
+				{APIGroup: "", Resource: "pods", Name: "test-pod", UID: "pod-uid-1"},
+			},
+			Allocation: &resourcev1.AllocationResult{
+				Devices: resourcev1.DeviceAllocationResult{
+					Results: []resourcev1.DeviceRequestAllocationResult{
+						{Driver: "networking.azure.com", Device: "eth1", Request: "nic"},
+					},
+				},
+			},
+		},
+	}
+
+	result, err := np.PrepareResourceClaims(ctx, []*resourcev1.ResourceClaim{cnsClaim})
+	if err != nil {
+		t.Fatalf("PrepareResourceClaims failed: %v", err)
+	}
+	if result[cnsClaim.UID].Err == nil {
+		t.Error("expected error when CNS client is nil")
+	}
+	if !strings.Contains(result[cnsClaim.UID].Err.Error(), "CNS client not configured") {
+		t.Errorf("unexpected error message: %v", result[cnsClaim.UID].Err)
 	}
 }
 
