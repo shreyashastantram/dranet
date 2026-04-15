@@ -1,11 +1,10 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: nginx-pn-test
+  name: pon-pod
   namespace: default
-  annotations:
-    # Reference to the ACN PodNetwork
-    multitenancy.acn.azure.com/podNetwork: pn-pon-test
+  labels:
+    kubernetes.azure.com/pod-network-instance: cust-pni
 spec:
   containers:
   - name: nginx
@@ -18,4 +17,4 @@ spec:
 
   resourceClaims:
   - name: pod-net
-    resourceClaimTemplateName: pod-subnet-shared-rct
+    resourceClaimTemplateName: cxsub-shared-rct

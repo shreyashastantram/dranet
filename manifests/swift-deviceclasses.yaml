@@ -13,6 +13,18 @@ spec:
 apiVersion: resource.k8s.io/v1
 kind: DeviceClass
 metadata:
+  name: swift-shared-nic-matching-cxsub
+spec:
+  selectors:
+    - cel:
+        expression: >
+          device.driver == "networking.azure.com" &&
+          device.attributes["networking.azure.com"].shared == true &&
+          device.attributes["networking.azure.com"].subnet == "cxsub"
+---
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
   name: swift-shared-nic-pristine
 spec:
   selectors:
