@@ -60,6 +60,7 @@ type GetNICResourcesResponse struct {
 type KubernetesPodInfo struct {
 	PodName      string `json:"podName"`
 	PodNamespace string `json:"podNamespace"`
+	PodUID       string `json:"podUID,omitempty"`
 }
 
 // IPSubnet describes an IP and its prefix length.
@@ -183,9 +184,19 @@ func (c *Client) GetNICResources(ctx context.Context) ([]NICResource, error) {
 
 // GetPodGoalState returns the CNS pod IP configurations for a pod.
 func (c *Client) GetPodGoalState(ctx context.Context, podName, podNamespace string) ([]PodIPInfo, error) {
+	return c.GetPodIPConfig(ctx, podName, podNamespace, "")
+}
+
+// GetPodIPConfig returns the CNS pod IP configurations for a pod identified
+// by name, namespace, and UID. It calls the CNS RequestIPConfigs endpoint
+// which is idempotent: it returns existing IP assignments or allocates new
+// ones if none exist. The podUID is included in the orchestrator context
+// for future CNS-side disambiguation but is currently ignored by CNS.
+func (c *Client) GetPodIPConfig(ctx context.Context, podName, podNamespace, podUID string) ([]PodIPInfo, error) {
 	orchestratorContext, err := json.Marshal(KubernetesPodInfo{
 		PodName:      podName,
 		PodNamespace: podNamespace,
+		PodUID:       podUID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal orchestrator context: %w", err)

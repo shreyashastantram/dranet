@@ -49,10 +49,12 @@ const (
 	rdmaCmPath = "/dev/infiniband/rdma_cm"
 
 	// CNS NIC resource attribute keys (per dra.pdf ResourceSlice spec)
-	cnsAttrNIC    = "networking.azure.com/nic"
-	cnsAttrSubnet = "networking.azure.com/subnet"
-	cnsAttrMac    = "networking.azure.com/mac"
-	cnsAttrShared = "networking.azure.com/shared"
+	cnsAttrNIC        = "networking.azure.com/nic"
+	cnsAttrSubnet     = "networking.azure.com/subnet"
+	cnsAttrSubnetName = "networking.azure.com/subnetName"
+	cnsAttrNetworkID  = "networking.azure.com/networkID"
+	cnsAttrMac        = "networking.azure.com/mac"
+	cnsAttrShared     = "networking.azure.com/shared"
 
 	// Consumable capacity key (KEP-5075)
 	cnsCapSlots = "networking.azure.com/slots"
@@ -226,15 +228,21 @@ func logCNSNICChanges(prev, curr []cnsclient.NICResource) {
 //
 // Each NIC becomes one device with:
 //   - allowMultipleAllocations: true
-//   - attributes: networking.azure.com/nic (NIC name), networking.azure.com/subnet (empty="" for pristine)
+//   - attributes: networking.azure.com/nic (NIC name), networking.azure.com/subnet (full ARM URI),
+//     networking.azure.com/subnetName (extracted name), networking.azure.com/networkID,
+//     networking.azure.com/mac, networking.azure.com/shared
 //   - capacity: networking.azure.com/slots with requestPolicy default=1, validRange min=1 max=1
 func (np *NetworkDriver) buildCNSDevices(nic *cnsclient.NICResource) []resourceapi.Device {
 	deviceName := cnsNICDeviceName(nic)
 
 	// networking.azure.com/nic = NIC name (e.g., "eth1")
 	nicName := deviceName
-	// networking.azure.com/subnet = subnet ID (empty "" for pristine/placeholder)
+	// networking.azure.com/subnet = subnet ID (full ARM URI or empty for pristine)
 	subnet := nic.SubnetID
+	// networking.azure.com/subnetName = extracted subnet name from ARM URI
+	subnetName := extractSubnetName(nic.SubnetID)
+	// networking.azure.com/networkID = network ID from CNS
+	networkID := nic.NetworkID
 
 	macAddr := nic.MacAddress
 	allowMultiAttr := true
@@ -243,6 +251,14 @@ func (np *NetworkDriver) buildCNSDevices(nic *cnsclient.NICResource) []resourcea
 		cnsAttrSubnet: {StringValue: &subnet},
 		cnsAttrMac:    {StringValue: &macAddr},
 		cnsAttrShared: {BoolValue: &allowMultiAttr},
+	}
+	// Only add subnetName if it's non-empty (extracted or plain)
+	if subnetName != "" {
+		attrs[cnsAttrSubnetName] = resourceapi.DeviceAttribute{StringValue: &subnetName}
+	}
+	// Only add networkID if it's non-empty
+	if networkID != "" {
+		attrs[cnsAttrNetworkID] = resourceapi.DeviceAttribute{StringValue: &networkID}
 	}
 
 	// Capacity defaults to 1 (pristine/placeholder); CNS sets blockSize when NICNC exists
@@ -533,6 +549,34 @@ func cnsNICDeviceName(nic *cnsclient.NICResource) string {
 		return nic.InterfaceName
 	}
 	return sanitizeMACForK8s(nic.MacAddress)
+}
+
+// extractSubnetName extracts the subnet name from an Azure ARM resource URI.
+// For example, given:
+//
+//	/subscriptions/.../resourceGroups/.../providers/Microsoft.Network/virtualNetworks/.../subnets/mySubnet
+//
+// it returns "mySubnet". If the input is not an ARM URI (no "/subnets/" segment),
+// it returns the original input as-is (handles plain subnet names).
+func extractSubnetName(subnetID string) string {
+	if subnetID == "" {
+		return ""
+	}
+	// Look for the "/subnets/" segment in ARM URIs (case-insensitive)
+	lower := strings.ToLower(subnetID)
+	const marker = "/subnets/"
+	idx := strings.LastIndex(lower, marker)
+	if idx < 0 {
+		// Not an ARM URI — return the original value as the subnet name
+		return subnetID
+	}
+	name := subnetID[idx+len(marker):]
+	// Trim any trailing slash
+	name = strings.TrimRight(name, "/")
+	if name == "" {
+		return subnetID
+	}
+	return name
 }
 
 // buildResourceSliceDeviceNameToMAC lists ResourceSlices for the CNS driver on this node

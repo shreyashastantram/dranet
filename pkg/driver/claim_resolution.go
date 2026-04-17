@@ -63,10 +63,10 @@ func (np *NetworkDriver) getPodGoalState(ctx context.Context, pod podConsumer, c
 		return infos, nil
 	}
 
-	klog.Infof("getPodGoalState: calling CNS for pod %s/%s UID=%s", pod.Namespace, pod.Name, pod.UID)
-	infos, err := np.cnsClient.GetPodGoalState(ctx, pod.Name, pod.Namespace)
+	klog.Infof("getPodGoalState: calling CNS GetPodIPConfig for pod %s/%s UID=%s", pod.Namespace, pod.Name, pod.UID)
+	infos, err := np.cnsClient.GetPodIPConfig(ctx, pod.Name, pod.Namespace, string(pod.UID))
 	if err != nil {
-		return nil, fmt.Errorf("failed to get CNS goal state for pod %s/%s: %w", pod.Namespace, pod.Name, err)
+		return nil, fmt.Errorf("failed to get CNS pod IP config for pod %s/%s: %w", pod.Namespace, pod.Name, err)
 	}
 	klog.Infof("getPodGoalState: CNS returned %d PodIPInfo entries for pod %s/%s", len(infos), pod.Namespace, pod.Name)
 	for i, info := range infos {
@@ -101,13 +101,19 @@ func (np *NetworkDriver) populateSwiftV2StoreForDevice(ctx context.Context, pod 
 
 	info, found := findPodIPInfoByMAC(infos, deviceMAC)
 	if !found {
-		klog.Infof("populateSwiftV2StoreForDevice: no CNS goal state matched pod %s/%s device %s MAC %s",
+		return fmt.Errorf("no CNS PodIPInfo matched pod %s/%s device %s MAC %s — kubelet will retry",
 			pod.Namespace, pod.Name, deviceName, deviceMAC)
-		return nil
 	}
 	klog.Infof("populateSwiftV2StoreForDevice: matched MAC=%q -> NICType=%q PodIP=%s/%d GW=%s",
 		deviceMAC, info.NICType, info.PodIPConfig.IPAddress, info.PodIPConfig.PrefixLength,
 		info.NetworkContainerPrimaryIPConfig.GatewayIPAddress)
+
+	// Validate required fields from CNS PodIPConfig response.
+	// If any are missing, fail so kubelet retries the prepare call.
+	if err := validatePodIPInfo(info); err != nil {
+		return fmt.Errorf("CNS PodIPConfig validation failed for pod %s/%s device %s: %w — kubelet will retry",
+			pod.Namespace, pod.Name, deviceName, err)
+	}
 
 	cfg, err := buildSwiftV2PodConfig(pod.UID, info)
 	if err != nil {
@@ -197,4 +203,19 @@ func buildSwiftV2PodConfig(podUID types.UID, info cnsclient.PodIPInfo) (SwiftV2P
 	cfg.Mode = NICModeDedicated
 	cfg.NIC.Addresses = []string{addressCIDR}
 	return cfg, nil
+}
+
+// validatePodIPInfo checks that a CNS PodIPInfo has the required fields
+// (MAC address and IP address) needed to configure pod networking. If any
+// required field is missing, it returns an error so the prepare call fails
+// and kubelet retries. Gateway is not strictly required because
+// buildSwiftV2PodConfig falls back to the SwiftV2 virtual gateway.
+func validatePodIPInfo(info cnsclient.PodIPInfo) error {
+	if info.MacAddress == "" {
+		return fmt.Errorf("missing MAC address in CNS PodIPConfig response")
+	}
+	if info.PodIPConfig.IPAddress == "" {
+		return fmt.Errorf("missing IP address in CNS PodIPConfig response")
+	}
+	return nil
 }
