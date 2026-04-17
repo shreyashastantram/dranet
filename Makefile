@@ -65,10 +65,15 @@ image-build: ensure-buildx
 		--load
 
 image-push: ensure-buildx
-	docker buildx build . \
-		--platform=$(PLATFORMS) \
-		--tag="${IMAGE}" \
-		--push
+	@if docker manifest inspect "${IMAGE}" > /dev/null 2>&1; then \
+		echo "Image ${IMAGE} already exists in registry, skipping build+push"; \
+	else \
+		echo "Image ${IMAGE} not found in registry, building and pushing..."; \
+		docker buildx build . \
+			--platform=$(PLATFORMS) \
+			--tag="${IMAGE}" \
+			--push; \
+	fi
 
 kind-cluster:
 	kind create cluster --name dra --config kind.yaml
