@@ -228,7 +228,6 @@ func TestIntegration_PrepareCNSResourceClaim_FastPath(t *testing.T) {
 							Name:       deviceName,
 							MacAddress: deviceMAC,
 							SubnetID:   "/subscriptions/sub1/subnets/sn1",
-							SubnetName: "sn1",
 						}},
 					})
 				case "/network/requestipconfigs":

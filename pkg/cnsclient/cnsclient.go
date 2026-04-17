@@ -40,7 +40,6 @@ type NICResource struct {
 	InterfaceName string `json:"interfaceName,omitempty"`
 	NetworkID     string `json:"networkID,omitempty"`
 	VMUniqueID    string `json:"vmUniqueID,omitempty"`
-	SubnetName    string `json:"subnetName,omitempty"`
 	SubnetID      string `json:"subnetID,omitempty"`
 	Capacity      int    `json:"capacity,omitempty"`
 }

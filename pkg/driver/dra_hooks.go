@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/dranet/internal/nlwrap"
 
 	resourceapi "k8s.io/api/resource/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -133,8 +134,8 @@ func (np *NetworkDriver) publishCNSResources(ctx context.Context) error {
 	var devices []resourceapi.Device
 	for i := range nicResources {
 		nic := &nicResources[i]
-		klog.V(3).Infof("CNS NIC[%d]: Name=%q InterfaceName=%q MacAddress=%q VMUniqueID=%q NetworkID=%q SubnetName=%q SubnetID=%q Capacity=%d",
-			i, nic.Name, nic.InterfaceName, nic.MacAddress, nic.VMUniqueID, nic.NetworkID, nic.SubnetName, nic.SubnetID, nic.Capacity)
+		klog.V(3).Infof("CNS NIC[%d]: Name=%q InterfaceName=%q MacAddress=%q VMUniqueID=%q NetworkID=%q SubnetID=%q Capacity=%d",
+			i, nic.Name, nic.InterfaceName, nic.MacAddress, nic.VMUniqueID, nic.NetworkID, nic.SubnetID, nic.Capacity)
 		devices = append(devices, np.buildCNSDevices(nic)...)
 	}
 
@@ -170,8 +171,8 @@ func logCNSNICChanges(prev, curr []cnsclient.NICResource) {
 	for mac, n := range currByMAC {
 		if _, ok := prevByMAC[mac]; !ok {
 			changed = true
-			klog.Infof("CNS ResourceSlice ADDED NIC: Name=%q InterfaceName=%q MAC=%q VMUniqueID=%q NetworkID=%q SubnetName=%q SubnetID=%q Capacity=%d",
-				n.Name, n.InterfaceName, n.MacAddress, n.VMUniqueID, n.NetworkID, n.SubnetName, n.SubnetID, n.Capacity)
+			klog.Infof("CNS ResourceSlice ADDED NIC: Name=%q InterfaceName=%q MAC=%q VMUniqueID=%q NetworkID=%q SubnetID=%q Capacity=%d",
+				n.Name, n.InterfaceName, n.MacAddress, n.VMUniqueID, n.NetworkID, n.SubnetID, n.Capacity)
 		}
 	}
 
@@ -179,8 +180,8 @@ func logCNSNICChanges(prev, curr []cnsclient.NICResource) {
 	for mac, n := range prevByMAC {
 		if _, ok := currByMAC[mac]; !ok {
 			changed = true
-			klog.Infof("CNS ResourceSlice REMOVED NIC: Name=%q InterfaceName=%q MAC=%q VMUniqueID=%q NetworkID=%q SubnetName=%q SubnetID=%q Capacity=%d",
-				n.Name, n.InterfaceName, n.MacAddress, n.VMUniqueID, n.NetworkID, n.SubnetName, n.SubnetID, n.Capacity)
+			klog.Infof("CNS ResourceSlice REMOVED NIC: Name=%q InterfaceName=%q MAC=%q VMUniqueID=%q NetworkID=%q SubnetID=%q Capacity=%d",
+				n.Name, n.InterfaceName, n.MacAddress, n.VMUniqueID, n.NetworkID, n.SubnetID, n.Capacity)
 		}
 	}
 
@@ -202,9 +203,6 @@ func logCNSNICChanges(prev, curr []cnsclient.NICResource) {
 		}
 		if p.NetworkID != c.NetworkID {
 			diffs = append(diffs, fmt.Sprintf("NetworkID: %q -> %q", p.NetworkID, c.NetworkID))
-		}
-		if p.SubnetName != c.SubnetName {
-			diffs = append(diffs, fmt.Sprintf("SubnetName: %q -> %q", p.SubnetName, c.SubnetName))
 		}
 		if p.SubnetID != c.SubnetID {
 			diffs = append(diffs, fmt.Sprintf("SubnetID: %q -> %q", p.SubnetID, c.SubnetID))
@@ -434,15 +432,32 @@ func (np *NetworkDriver) prepareCNSResourceClaim(ctx context.Context, claim *res
 	}
 	klog.Infof("prepareCNSResourceClaim: CNS returned %d NIC resources", len(nicResources))
 
-	// Build lookup map from device name → NICResource.
-	// Device names follow the same convention used by buildCNSDevices:
-	// Name > InterfaceName > sanitized MAC.
-	nicByDeviceName := make(map[string]cnsclient.NICResource, len(nicResources))
-	for _, nic := range nicResources {
+	// Build primary lookup map from MAC address → NICResource (from CNS GetNICResources).
+	// MAC addresses are the canonical unique identifier for each NIC.
+	nicByMAC := make(map[string]cnsclient.NICResource, len(nicResources))
+	deviceNameToMAC := make(map[string]string, len(nicResources))
+	for i, nic := range nicResources {
 		name := cnsNICDeviceName(&nic)
-		nicByDeviceName[name] = nic
-		klog.Infof("prepareCNSResourceClaim: NIC %q MAC=%s InterfaceName=%q SubnetID=%q",
-			name, nic.MacAddress, nic.InterfaceName, nic.SubnetID)
+		mac := nic.MacAddress
+		nicByMAC[mac] = nic
+		deviceNameToMAC[name] = mac
+		klog.Infof("prepareCNSResourceClaim: processing nicResources[%d]: cnsNICDeviceName=%q Name=%q InterfaceName=%q MAC=%s VMUniqueID=%q NetworkID=%q SubnetID=%q Capacity=%d",
+			i, name, nic.Name, nic.InterfaceName, nic.MacAddress, nic.VMUniqueID, nic.NetworkID, nic.SubnetID, nic.Capacity)
+	}
+
+	// Build fallback deviceName→MAC map from ResourceSlices published by this driver on this node.
+	// This is the authoritative source for device name → MAC mapping since it reflects what the
+	// scheduler allocated against.
+	rsDeviceNameToMAC := np.buildResourceSliceDeviceNameToMAC(ctx)
+
+	// Log both maps for diagnostics.
+	klog.Infof("prepareCNSResourceClaim: deviceNameToMAC (from CNS GetNICResources, %d entries):", len(deviceNameToMAC))
+	for name, mac := range deviceNameToMAC {
+		klog.Infof("  CNS map: deviceName=%q -> MAC=%q", name, mac)
+	}
+	klog.Infof("prepareCNSResourceClaim: rsDeviceNameToMAC (from ResourceSlices, %d entries):", len(rsDeviceNameToMAC))
+	for name, mac := range rsDeviceNameToMAC {
+		klog.Infof("  ResourceSlice map: deviceName=%q -> MAC=%q", name, mac)
 	}
 
 	var errorList []error
@@ -457,19 +472,33 @@ func (np *NetworkDriver) prepareCNSResourceClaim(ctx context.Context, claim *res
 			continue
 		}
 
-		// Look up the NIC in the CNS NIC state to resolve the MAC address
-		// and confirm the device exists.
+		// Look up the NIC by resolving deviceName → MAC, then MAC → NICResource.
+		// Try the primary CNS map first, then fall back to the ResourceSlice map.
 		deviceName := result.Device
-		nic, ok := nicByDeviceName[deviceName]
+		mac, macFound := deviceNameToMAC[deviceName]
+		if macFound {
+			klog.Infof("prepareCNSResourceClaim: device %q -> MAC %q (from CNS map)", deviceName, mac)
+		} else {
+			mac, macFound = rsDeviceNameToMAC[deviceName]
+			if macFound {
+				klog.Infof("prepareCNSResourceClaim: device %q -> MAC %q (from ResourceSlice fallback map)", deviceName, mac)
+			} else {
+				klog.Errorf("prepareCNSResourceClaim: device %q not found in CNS map (%d entries) or ResourceSlice map (%d entries) for claim %s/%s",
+					deviceName, len(deviceNameToMAC), len(rsDeviceNameToMAC), claim.Namespace, claim.Name)
+				errorList = append(errorList, fmt.Errorf("CNS NIC resource not found for device %s in any map", deviceName))
+				continue
+			}
+		}
+		nic, ok := nicByMAC[mac]
 		if !ok {
-			klog.Errorf("prepareCNSResourceClaim: device %q not found in CNS NIC resources for claim %s/%s",
-				deviceName, claim.Namespace, claim.Name)
-			errorList = append(errorList, fmt.Errorf("CNS NIC resource not found for device %s", deviceName))
+			klog.Errorf("prepareCNSResourceClaim: MAC %q (device %q) not found in nicByMAC (%d entries) for claim %s/%s",
+				mac, deviceName, len(nicByMAC), claim.Namespace, claim.Name)
+			errorList = append(errorList, fmt.Errorf("CNS NIC resource not found for MAC %s (device %s)", mac, deviceName))
 			continue
 		}
 		deviceMAC := nic.MacAddress
-		klog.Infof("prepareCNSResourceClaim: device %q resolved from CNS NIC state: MAC=%q SubnetID=%q SubnetName=%q",
-			deviceName, deviceMAC, nic.SubnetID, nic.SubnetName)
+		klog.Infof("prepareCNSResourceClaim: device %q resolved from CNS NIC state: MAC=%q SubnetID=%q",
+			deviceName, deviceMAC, nic.SubnetID)
 
 		// Query CNS GetPodGoalState for each pod consumer and store the
 		// per-pod networking config in SwiftV2PodConfigStore for the NRI hook.
@@ -504,6 +533,50 @@ func cnsNICDeviceName(nic *cnsclient.NICResource) string {
 		return nic.InterfaceName
 	}
 	return sanitizeMACForK8s(nic.MacAddress)
+}
+
+// buildResourceSliceDeviceNameToMAC lists ResourceSlices for the CNS driver on this node
+// and builds a deviceName → MAC map from the networking.azure.com/nic and networking.azure.com/mac
+// device attributes. This serves as a fallback when the CNS GetNICResources device name
+// convention doesn't match what the scheduler allocated against.
+func (np *NetworkDriver) buildResourceSliceDeviceNameToMAC(ctx context.Context) map[string]string {
+	result := make(map[string]string)
+	if np.kubeClient == nil || np.cnsDriverName == "" {
+		klog.Infof("buildResourceSliceDeviceNameToMAC: skipping (kubeClient=%v, cnsDriverName=%q)", np.kubeClient != nil, np.cnsDriverName)
+		return result
+	}
+
+	slices, err := np.kubeClient.ResourceV1().ResourceSlices().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		klog.Errorf("buildResourceSliceDeviceNameToMAC: failed to list ResourceSlices: %v", err)
+		return result
+	}
+
+	for _, rs := range slices.Items {
+		// Only look at slices for the CNS driver on this node.
+		if rs.Spec.Driver != np.cnsDriverName {
+			continue
+		}
+		if rs.Spec.NodeName == nil || *rs.Spec.NodeName != np.nodeName {
+			continue
+		}
+		klog.Infof("buildResourceSliceDeviceNameToMAC: processing ResourceSlice %q (driver=%q, node=%q, pool=%q, %d devices)",
+			rs.Name, rs.Spec.Driver, *rs.Spec.NodeName, rs.Spec.Pool.Name, len(rs.Spec.Devices))
+		for _, dev := range rs.Spec.Devices {
+			nicAttr, hasNIC := dev.Attributes[cnsAttrNIC]
+			macAttr, hasMAC := dev.Attributes[cnsAttrMac]
+			if !hasNIC || nicAttr.StringValue == nil || !hasMAC || macAttr.StringValue == nil {
+				klog.V(4).Infof("buildResourceSliceDeviceNameToMAC: device %q missing nic/mac attributes, skipping", dev.Name)
+				continue
+			}
+			deviceName := dev.Name
+			mac := *macAttr.StringValue
+			result[deviceName] = mac
+			klog.Infof("buildResourceSliceDeviceNameToMAC: device %q -> MAC=%q (nic attr=%q)", deviceName, mac, *nicAttr.StringValue)
+		}
+	}
+	klog.Infof("buildResourceSliceDeviceNameToMAC: built %d entries from ResourceSlices", len(result))
+	return result
 }
 
 // prepareResourceClaim gets all the configuration required to be applied at runtime and passes it downs to the handlers.
