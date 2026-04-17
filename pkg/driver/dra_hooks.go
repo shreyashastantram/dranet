@@ -542,13 +542,16 @@ func (np *NetworkDriver) prepareCNSResourceClaim(ctx context.Context, claim *res
 // cnsNICDeviceName returns the device name for a CNS NICResource, using the
 // same naming convention as buildCNSDevices: Name > InterfaceName > sanitized MAC.
 func cnsNICDeviceName(nic *cnsclient.NICResource) string {
+	name := ""
 	if nic.Name != "" {
-		return nic.Name
+		name = nic.Name
+	} else if nic.InterfaceName != "" {
+		name = nic.InterfaceName
+	} else {
+		return sanitizeMACForK8s(nic.MacAddress)
 	}
-	if nic.InterfaceName != "" {
-		return nic.InterfaceName
-	}
-	return sanitizeMACForK8s(nic.MacAddress)
+	// ResourceSlice device names must be valid RFC 1123 labels (lowercase).
+	return strings.ToLower(name)
 }
 
 // extractSubnetName extracts the subnet name from an Azure ARM resource URI.
