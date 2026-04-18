@@ -49,12 +49,11 @@ const (
 	rdmaCmPath = "/dev/infiniband/rdma_cm"
 
 	// CNS NIC resource attribute keys (per dra.pdf ResourceSlice spec)
-	cnsAttrNIC        = "networking.azure.com/nic"
-	cnsAttrSubnet     = "networking.azure.com/subnet"
-	cnsAttrSubnetName = "networking.azure.com/subnetName"
-	cnsAttrNetworkID  = "networking.azure.com/networkID"
-	cnsAttrMac        = "networking.azure.com/mac"
-	cnsAttrShared     = "networking.azure.com/shared"
+	cnsAttrNIC       = "networking.azure.com/nic"
+	cnsAttrSubnet    = "networking.azure.com/subnet"
+	cnsAttrNetworkID = "networking.azure.com/networkID"
+	cnsAttrMac       = "networking.azure.com/mac"
+	cnsAttrShared    = "networking.azure.com/shared"
 
 	// Consumable capacity key (KEP-5075)
 	cnsCapSlots = "networking.azure.com/slots"
@@ -237,10 +236,8 @@ func (np *NetworkDriver) buildCNSDevices(nic *cnsclient.NICResource) []resourcea
 
 	// networking.azure.com/nic = NIC name (e.g., "eth1")
 	nicName := deviceName
-	// networking.azure.com/subnet = subnet ID (full ARM URI or empty for pristine)
-	subnet := nic.SubnetID
-	// networking.azure.com/subnetName = extracted subnet name from ARM URI
-	subnetName := extractSubnetName(nic.SubnetID)
+	// networking.azure.com/subnet = extracted subnet name from ARM URI (max 64 bytes for K8s attribute)
+	subnet := extractSubnetName(nic.SubnetID)
 	// networking.azure.com/networkID = network ID from CNS
 	networkID := nic.NetworkID
 
@@ -251,10 +248,6 @@ func (np *NetworkDriver) buildCNSDevices(nic *cnsclient.NICResource) []resourcea
 		cnsAttrSubnet: {StringValue: &subnet},
 		cnsAttrMac:    {StringValue: &macAddr},
 		cnsAttrShared: {BoolValue: &allowMultiAttr},
-	}
-	// Only add subnetName if it's non-empty (extracted or plain)
-	if subnetName != "" {
-		attrs[cnsAttrSubnetName] = resourceapi.DeviceAttribute{StringValue: &subnetName}
 	}
 	// Only add networkID if it's non-empty
 	if networkID != "" {
