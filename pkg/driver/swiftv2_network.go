@@ -88,6 +88,19 @@ func nsAttachIPVlanL3(cfg *NICConfig, containerNsPath string) (*resourceapi.Netw
 		return nil, fmt.Errorf("parent NIC (MAC %s) not found: %w", cfg.MAC, err)
 	}
 
+	// Ensure the parent NIC is UP. Azure delegated NICs (e.g. eth1) are
+	// attached to the VM by the platform but start with "state DOWN, qdisc noop".
+	// Nothing else on the node brings them up — the CNI's network_linux.go does
+	// this via SetLinkState(hostIf.Name, true) for its parent interfaces.
+	// ipvlan children and host routes require the parent to be operationally up.
+	if parent.Attrs().OperState != netlink.OperUp {
+		klog.V(2).Infof("SwiftV2: parent NIC %s (MAC %s) is %s, bringing it UP",
+			parent.Attrs().Name, cfg.MAC, parent.Attrs().OperState)
+		if err := netlink.LinkSetUp(parent); err != nil {
+			return nil, fmt.Errorf("failed to bring parent NIC %s up: %w", parent.Attrs().Name, err)
+		}
+	}
+
 	// Compute the deterministic ipvlan child name (first 8 chars of PodUID).
 	ipvlName := fmt.Sprintf("ipvl-%s", truncateUID(cfg.PodUID))
 
