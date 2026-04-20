@@ -110,7 +110,6 @@ func (np *NetworkDriver) RunPodSandbox(ctx context.Context, pod *api.PodSandbox)
 		nriPluginRequestsTotal.WithLabelValues(methodRunPodSandbox, status).Inc()
 		klog.Infof("DEBUG RunPodSandbox EXIT Pod %s/%s UID %s status=%s took %v", pod.Namespace, pod.Name, pod.Uid, status, time.Since(start))
 		nriPluginRequestsLatencySeconds.WithLabelValues(methodRunPodSandbox, status).Observe(time.Since(start).Seconds())
-
 	}()
 
 	podUID := types.UID(pod.GetUid())
@@ -164,6 +163,7 @@ func (np *NetworkDriver) RunPodSandbox(ctx context.Context, pod *api.PodSandbox)
 
 	return nil
 }
+
 func (np *NetworkDriver) runPodSandbox(_ context.Context, pod *api.PodSandbox, podConfig map[string]PodConfig) error {
 	klog.Infof("DEBUG runPodSandbox ENTER Pod %s/%s UID %s with %d device configs", pod.Namespace, pod.Name, pod.Uid, len(podConfig))
 	// get the pod network namespace
