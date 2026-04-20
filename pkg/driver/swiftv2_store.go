@@ -84,24 +84,38 @@ type SwiftV2PodConfig struct {
 type SwiftV2PodConfigStore struct {
 	mu    sync.RWMutex
 	store map[types.UID]map[string]SwiftV2PodConfig // podUID → deviceName → config
+
+	// claimToPods tracks which pod UIDs are associated with each claim,
+	// so UnprepareResourceClaims can clean up by claim name.
+	claimToPods map[types.NamespacedName][]types.UID // claimKey → []podUID
 }
 
 // NewSwiftV2PodConfigStore creates and returns a new SwiftV2PodConfigStore.
 func NewSwiftV2PodConfigStore() *SwiftV2PodConfigStore {
 	return &SwiftV2PodConfigStore{
-		store: make(map[types.UID]map[string]SwiftV2PodConfig),
+		store:       make(map[types.UID]map[string]SwiftV2PodConfig),
+		claimToPods: make(map[types.NamespacedName][]types.UID),
 	}
 }
 
 // Set stores the configuration for a specific device under a given pod UID.
 // If a configuration for the pod UID or device name already exists, it will be overwritten.
-func (s *SwiftV2PodConfigStore) Set(podUID types.UID, device string, cfg SwiftV2PodConfig) {
+// The claimKey is used to track which pods are associated with a claim for cleanup.
+func (s *SwiftV2PodConfigStore) Set(podUID types.UID, device string, cfg SwiftV2PodConfig, claimKey types.NamespacedName) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.store[podUID] == nil {
 		s.store[podUID] = make(map[string]SwiftV2PodConfig)
 	}
 	s.store[podUID][device] = cfg
+
+	// Track claim → pod UID mapping (avoid duplicates).
+	for _, uid := range s.claimToPods[claimKey] {
+		if uid == podUID {
+			return
+		}
+	}
+	s.claimToPods[claimKey] = append(s.claimToPods[claimKey], podUID)
 }
 
 // Get retrieves all device configurations for a given pod UID.
@@ -127,4 +141,16 @@ func (s *SwiftV2PodConfigStore) Delete(podUID types.UID) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.store, podUID)
+}
+
+// DeleteByClaim removes all pod configurations associated with the given claim.
+// This is called during UnprepareResourceClaims when the pod is actually deleted.
+func (s *SwiftV2PodConfigStore) DeleteByClaim(claimKey types.NamespacedName) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	podUIDs := s.claimToPods[claimKey]
+	for _, uid := range podUIDs {
+		delete(s.store, uid)
+	}
+	delete(s.claimToPods, claimKey)
 }

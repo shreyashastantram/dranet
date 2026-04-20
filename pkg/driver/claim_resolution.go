@@ -81,7 +81,7 @@ func (np *NetworkDriver) getPodGoalState(ctx context.Context, pod podConsumer, c
 	return infos, nil
 }
 
-func (np *NetworkDriver) populateSwiftV2StoreForDevice(ctx context.Context, pod podConsumer, deviceName, deviceMAC string, cache map[types.UID][]cnsclient.PodIPInfo) error {
+func (np *NetworkDriver) populateSwiftV2StoreForDevice(ctx context.Context, pod podConsumer, deviceName, deviceMAC string, claimKey types.NamespacedName, cache map[types.UID][]cnsclient.PodIPInfo) error {
 	if np.cnsClient == nil {
 		klog.Infof("populateSwiftV2StoreForDevice: cnsClient is nil, skipping for pod %s/%s device %s", pod.Namespace, pod.Name, deviceName)
 		return nil
@@ -123,7 +123,7 @@ func (np *NetworkDriver) populateSwiftV2StoreForDevice(ctx context.Context, pod 
 	if np.swiftV2Store == nil {
 		np.swiftV2Store = NewSwiftV2PodConfigStore()
 	}
-	np.swiftV2Store.Set(pod.UID, deviceName, cfg)
+	np.swiftV2Store.Set(pod.UID, deviceName, cfg, claimKey)
 	klog.Infof("populateSwiftV2StoreForDevice: stored SwiftV2 config for pod %s/%s UID=%s device=%q", pod.Namespace, pod.Name, pod.UID, deviceName)
 	return nil
 }

@@ -514,7 +514,8 @@ func (np *NetworkDriver) prepareCNSResourceClaim(ctx context.Context, claim *res
 		for _, pod := range podConsumers {
 			klog.Infof("prepareCNSResourceClaim: populating SwiftV2 store for pod %s/%s UID=%s device=%q MAC=%q",
 				pod.Namespace, pod.Name, pod.UID, deviceName, deviceMAC)
-			if err := np.populateSwiftV2StoreForDevice(ctx, pod, deviceName, deviceMAC, goalStateByPod); err != nil {
+			claimKey := types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}
+			if err := np.populateSwiftV2StoreForDevice(ctx, pod, deviceName, deviceMAC, claimKey, goalStateByPod); err != nil {
 				klog.Errorf("prepareCNSResourceClaim: populateSwiftV2StoreForDevice failed for pod %s/%s device %q: %v",
 					pod.Namespace, pod.Name, deviceName, err)
 				errorList = append(errorList, err)
@@ -915,6 +916,10 @@ func (np *NetworkDriver) unprepareResourceClaims(ctx context.Context, claims []k
 
 func (np *NetworkDriver) unprepareResourceClaim(_ context.Context, claim kubeletplugin.NamespacedObject) error {
 	np.podConfigStore.DeleteClaim(claim.NamespacedName)
+	if np.swiftV2Store != nil {
+		np.swiftV2Store.DeleteByClaim(claim.NamespacedName)
+	}
+	klog.V(2).Infof("UnprepareResourceClaim: cleaned up DRA and SwiftV2 stores for claim %s/%s", claim.Namespace, claim.Name)
 	return nil
 }
 

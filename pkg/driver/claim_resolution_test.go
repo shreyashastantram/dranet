@@ -103,7 +103,7 @@ func TestPopulateSwiftV2StoreForDevice(t *testing.T) {
 
 	pod := podConsumer{UID: types.UID("pod-uid-1"), Name: "pod-a", Namespace: "ns-a"}
 	cache := map[types.UID][]cnsclient.PodIPInfo{}
-	if err := np.populateSwiftV2StoreForDevice(context.Background(), pod, "eth1", "aa:bb:cc:dd:ee:01", cache); err != nil {
+	if err := np.populateSwiftV2StoreForDevice(context.Background(), pod, "eth1", "aa:bb:cc:dd:ee:01", types.NamespacedName{Namespace: "ns-a", Name: "claim-a"}, cache); err != nil {
 		t.Fatalf("populateSwiftV2StoreForDevice() failed: %v", err)
 	}
 

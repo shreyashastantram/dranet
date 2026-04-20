@@ -1,0 +1,4 @@
+NAME         READY   STATUS    RESTARTS   AGE
+sharedpod1   1/1     Running   0          6m39s
+sharedpod2   1/1     Running   0          3m38s
+sharedpod3   1/1     Running   0          3m17s

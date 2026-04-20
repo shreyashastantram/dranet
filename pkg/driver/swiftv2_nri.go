@@ -20,7 +20,6 @@ import (
 	"fmt"
 
 	"github.com/containerd/nri/pkg/api"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 )
 
@@ -111,8 +110,6 @@ func (np *NetworkDriver) stopPodSandboxSwiftV2(pod *api.PodSandbox, configs map[
 		ns = np.netdb.GetPodNetNs(podKey(pod))
 	}
 
-	podUID := pod.GetUid()
-
 	for deviceName, cfg := range configs {
 		switch cfg.Mode {
 		case NICModeShared:
@@ -138,6 +135,4 @@ func (np *NetworkDriver) stopPodSandboxSwiftV2(pod *api.PodSandbox, configs map[
 		}
 	}
 
-	// Clean up the SwiftV2 store entry for this pod.
-	np.swiftV2Store.Delete(types.UID(podUID))
 }

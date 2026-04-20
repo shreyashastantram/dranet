@@ -1,0 +1,148 @@
+Name:         sharedpod1
+Namespace:    default
+Labels:       kubernetes.azure.com/currentStatus=Ready
+              kubernetes.azure.com/lastStatus=Pending
+              kubernetes.azure.com/lastTransitionTime=20260420-091129.432
+              kubernetes.azure.com/statusTransitionCount=2
+Annotations:  <none>
+API Version:  multitenancy.acn.azure.com/v1alpha1
+Kind:         MultitenantPodNetworkConfig
+Metadata:
+  Creation Timestamp:  2026-04-20T09:11:26Z
+  Finalizers:
+    finalizers.acn.azure.com/dnc-operations
+  Generation:  1
+  Owner References:
+    API Version:           v1
+    Block Owner Deletion:  true
+    Controller:            true
+    Kind:                  Pod
+    Name:                  sharedpod1
+    UID:                   1cf562d5-c910-4de0-8fe8-947c1f3de092
+  Resource Version:        29672
+  UID:                     114836c1-38b6-4a6a-9450-82746b7905de
+Spec:
+  Pod Name:              sharedpod1
+  Pod Network:           
+  Pod Network Instance:  cust-pni
+  Pod UID:               1cf562d5-c910-4de0-8fe8-947c1f3de092
+Status:
+  Default Deny ACL:  false
+  Gateway IP:        172.26.0.1
+  Interface Infos:
+    Accelnet Enabled:      true
+    Device Type:           acn.azure.com/vnet-nic
+    Gateway IP:            172.26.0.1
+    Mac Address:           7c:ed:8d:87:6c:04
+    Nc ID:                 fb9cd5ec-a3e8-43b9-bce0-61b33afc743d
+    Primary IP:            172.26.0.49/32
+    Shared Nic:            true
+    Subnet Address Space:  172.26.0.0/16
+  Mac Address:             7c:ed:8d:87:6c:04
+  Nc ID:                   fb9cd5ec-a3e8-43b9-bce0-61b33afc743d
+  Node Name:               aks-nodes-41132151-vmss000001
+  Primary IP:              172.26.0.49/32
+Events:
+  Type     Reason                Age                 From                                           Message
+  ----     ------                ----                ----                                           -------
+  Warning  CreateOrUpdateFailed  6m58s (x9 over 7m)  dnc-rc/multitenantpodnetworkconfig-reconciler  NICNC nicnc-7c-ed-8d-87-6c-04 is not ready (status: ): nicnetworkconfig not ready
+
+
+Name:         sharedpod2
+Namespace:    default
+Labels:       kubernetes.azure.com/currentStatus=Ready
+              kubernetes.azure.com/lastStatus=Pending
+              kubernetes.azure.com/lastTransitionTime=20260420-091427.630
+              kubernetes.azure.com/statusTransitionCount=2
+Annotations:  <none>
+API Version:  multitenancy.acn.azure.com/v1alpha1
+Kind:         MultitenantPodNetworkConfig
+Metadata:
+  Creation Timestamp:  2026-04-20T09:14:27Z
+  Finalizers:
+    finalizers.acn.azure.com/dnc-operations
+  Generation:  1
+  Owner References:
+    API Version:           v1
+    Block Owner Deletion:  true
+    Controller:            true
+    Kind:                  Pod
+    Name:                  sharedpod2
+    UID:                   c62c82c6-f52e-4986-8d4f-4c1b54d8ef3f
+  Resource Version:        30446
+  UID:                     5ec5f49f-ad07-42f5-a1b8-9415014da06c
+Spec:
+  Pod Name:              sharedpod2
+  Pod Network:           
+  Pod Network Instance:  cust-pni
+  Pod UID:               c62c82c6-f52e-4986-8d4f-4c1b54d8ef3f
+Status:
+  Default Deny ACL:  false
+  Gateway IP:        172.26.0.1
+  Interface Infos:
+    Accelnet Enabled:      true
+    Device Type:           acn.azure.com/vnet-nic
+    Gateway IP:            172.26.0.1
+    Mac Address:           7c:ed:8d:87:6c:04
+    Nc ID:                 fb9cd5ec-a3e8-43b9-bce0-61b33afc743d
+    Primary IP:            172.26.0.50/32
+    Shared Nic:            true
+    Subnet Address Space:  172.26.0.0/16
+  Mac Address:             7c:ed:8d:87:6c:04
+  Nc ID:                   fb9cd5ec-a3e8-43b9-bce0-61b33afc743d
+  Node Name:               aks-nodes-41132151-vmss000001
+  Primary IP:              172.26.0.50/32
+Events:
+  Type     Reason                Age    From                                           Message
+  ----     ------                ----   ----                                           -------
+  Warning  CreateOrUpdateFailed  3m59s  dnc-rc/multitenantpodnetworkconfig-reconciler  pod default/sharedpod2 IP not yet allocated in NICNC nicnc-7c-ed-8d-87-6c-04: nicnetworkconfig not ready
+
+
+Name:         sharedpod3
+Namespace:    default
+Labels:       kubernetes.azure.com/currentStatus=Ready
+              kubernetes.azure.com/lastStatus=Pending
+              kubernetes.azure.com/lastTransitionTime=20260420-091448.383
+              kubernetes.azure.com/statusTransitionCount=2
+Annotations:  <none>
+API Version:  multitenancy.acn.azure.com/v1alpha1
+Kind:         MultitenantPodNetworkConfig
+Metadata:
+  Creation Timestamp:  2026-04-20T09:14:48Z
+  Finalizers:
+    finalizers.acn.azure.com/dnc-operations
+  Generation:  1
+  Owner References:
+    API Version:           v1
+    Block Owner Deletion:  true
+    Controller:            true
+    Kind:                  Pod
+    Name:                  sharedpod3
+    UID:                   8b6a46c6-49a7-447e-9c32-5614a27c2692
+  Resource Version:        30551
+  UID:                     7e215ab2-3130-4621-9477-e3d282b6ebc2
+Spec:
+  Pod Name:              sharedpod3
+  Pod Network:           
+  Pod Network Instance:  cust-pni
+  Pod UID:               8b6a46c6-49a7-447e-9c32-5614a27c2692
+Status:
+  Default Deny ACL:  false
+  Gateway IP:        172.26.0.1
+  Interface Infos:
+    Accelnet Enabled:      true
+    Device Type:           acn.azure.com/vnet-nic
+    Gateway IP:            172.26.0.1
+    Mac Address:           7c:ed:8d:87:6c:04
+    Nc ID:                 fb9cd5ec-a3e8-43b9-bce0-61b33afc743d
+    Primary IP:            172.26.0.51/32
+    Shared Nic:            true
+    Subnet Address Space:  172.26.0.0/16
+  Mac Address:             7c:ed:8d:87:6c:04
+  Nc ID:                   fb9cd5ec-a3e8-43b9-bce0-61b33afc743d
+  Node Name:               aks-nodes-41132151-vmss000001
+  Primary IP:              172.26.0.51/32
+Events:
+  Type     Reason                Age                    From                                           Message
+  ----     ------                ----                   ----                                           -------
+  Warning  CreateOrUpdateFailed  3m38s (x3 over 3m38s)  dnc-rc/multitenantpodnetworkconfig-reconciler  pod default/sharedpod3 IP not yet allocated in NICNC nicnc-7c-ed-8d-87-6c-04: nicnetworkconfig not ready

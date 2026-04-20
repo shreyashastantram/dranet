@@ -47,7 +47,7 @@ func TestSwiftV2PodConfigStore_SetAndGet(t *testing.T) {
 		},
 	}
 
-	store.Set(podUID, deviceName, cfg)
+	store.Set(podUID, deviceName, cfg, types.NamespacedName{Namespace: "ns", Name: "claim"})
 
 	got := store.Get(podUID)
 	if got == nil {
@@ -83,7 +83,7 @@ func TestSwiftV2PodConfigStore_GetReturnsCopy(t *testing.T) {
 	store := NewSwiftV2PodConfigStore()
 
 	podUID := types.UID("test-pod-uid")
-	store.Set(podUID, "eth1", SwiftV2PodConfig{Mode: NICModeShared})
+	store.Set(podUID, "eth1", SwiftV2PodConfig{Mode: NICModeShared}, types.NamespacedName{Namespace: "ns", Name: "claim"})
 
 	got := store.Get(podUID)
 	// Mutate the returned map
@@ -103,7 +103,7 @@ func TestSwiftV2PodConfigStore_Delete(t *testing.T) {
 	store := NewSwiftV2PodConfigStore()
 
 	podUID := types.UID("test-pod-uid")
-	store.Set(podUID, "eth1", SwiftV2PodConfig{Mode: NICModeShared})
+	store.Set(podUID, "eth1", SwiftV2PodConfig{Mode: NICModeShared}, types.NamespacedName{Namespace: "ns", Name: "claim"})
 
 	store.Delete(podUID)
 
@@ -117,8 +117,8 @@ func TestSwiftV2PodConfigStore_MultipleDevices(t *testing.T) {
 	store := NewSwiftV2PodConfigStore()
 
 	podUID := types.UID("test-pod-uid")
-	store.Set(podUID, "eth1", SwiftV2PodConfig{Mode: NICModeShared})
-	store.Set(podUID, "eth2", SwiftV2PodConfig{Mode: NICModeDedicated})
+	store.Set(podUID, "eth1", SwiftV2PodConfig{Mode: NICModeShared}, types.NamespacedName{Namespace: "ns", Name: "claim"})
+	store.Set(podUID, "eth2", SwiftV2PodConfig{Mode: NICModeDedicated}, types.NamespacedName{Namespace: "ns", Name: "claim"})
 
 	got := store.Get(podUID)
 	if len(got) != 2 {
@@ -136,8 +136,8 @@ func TestSwiftV2PodConfigStore_OverwriteDevice(t *testing.T) {
 	store := NewSwiftV2PodConfigStore()
 
 	podUID := types.UID("test-pod-uid")
-	store.Set(podUID, "eth1", SwiftV2PodConfig{Mode: NICModeShared})
-	store.Set(podUID, "eth1", SwiftV2PodConfig{Mode: NICModeDedicated})
+	store.Set(podUID, "eth1", SwiftV2PodConfig{Mode: NICModeShared}, types.NamespacedName{Namespace: "ns", Name: "claim"})
+	store.Set(podUID, "eth1", SwiftV2PodConfig{Mode: NICModeDedicated}, types.NamespacedName{Namespace: "ns", Name: "claim"})
 
 	got := store.Get(podUID)
 	if len(got) != 1 {
@@ -169,7 +169,7 @@ func TestSwiftV2PodConfigStore_DedicatedNICConfig(t *testing.T) {
 		},
 	}
 
-	store.Set(podUID, "eth1", cfg)
+	store.Set(podUID, "eth1", cfg, types.NamespacedName{Namespace: "ns", Name: "claim"})
 
 	got := store.Get(podUID)
 	gotCfg := got["eth1"]
