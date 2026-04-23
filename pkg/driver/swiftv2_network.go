@@ -35,6 +35,12 @@ const (
 	// delegated NIC routing. This matches the CNS middleware constant.
 	swiftV2VirtualGW = "169.254.2.1"
 
+	// swiftV2VirtualGWMAC is the well-known MAC address that Azure VFP uses
+	// for the virtual gateway on delegated NICs. ipvlan L3 interfaces have
+	// NOARP set, so they cannot ARP-resolve the gateway; a static neighbor
+	// entry with this MAC is required for cross-node traffic to flow.
+	swiftV2VirtualGWMAC = "12:34:56:78:9a:bc"
+
 	// swiftV2DelegatedIfName is the interface name assigned to delegated NICs
 	// inside the pod namespace (both shared ipvlan children and dedicated NICs
 	// when NRI plumbs them).
@@ -226,11 +232,29 @@ func nsAttachIPVlanL3(cfg *NICConfig, containerNsPath string) (*resourceapi.Netw
 		return nil, fmt.Errorf("failed to bring up %s: %w", swiftV2DelegatedIfName, err)
 	}
 
-	// Add gateway /32 scope link route (gateway reachable directly on link).
+	// Add static neighbor entry for the Azure virtual gateway. ipvlan L3
+	// interfaces have NOARP set, so they cannot ARP-resolve 169.254.2.1.
+	// Without this entry, cross-node traffic (which goes via the default
+	// route through the gateway) silently fails.
+	gwMAC, err := net.ParseMAC(swiftV2VirtualGWMAC)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse gateway MAC %s: %w", swiftV2VirtualGWMAC, err)
+	}
 	gwIP := net.ParseIP(cfg.GatewayIP)
 	if gwIP == nil {
 		return nil, fmt.Errorf("invalid gateway IP: %s", cfg.GatewayIP)
 	}
+	neighEntry := &netlink.Neigh{
+		LinkIndex:    nsLink.Attrs().Index,
+		IP:           gwIP,
+		HardwareAddr: gwMAC,
+		State:        netlink.NUD_PERMANENT,
+	}
+	if err := nhNs.NeighAdd(neighEntry); err != nil && !errors.Is(err, syscall.EEXIST) {
+		return nil, fmt.Errorf("failed to add static neighbor %s -> %s: %w", cfg.GatewayIP, swiftV2VirtualGWMAC, err)
+	}
+
+	// Add gateway /32 scope link route (gateway reachable directly on link).
 	gwRoute := netlink.Route{
 		Dst:       &net.IPNet{IP: gwIP, Mask: net.CIDRMask(32, 32)},
 		LinkIndex: nsLink.Attrs().Index,
