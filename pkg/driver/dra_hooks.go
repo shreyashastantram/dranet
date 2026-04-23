@@ -138,7 +138,7 @@ func (np *NetworkDriver) publishCNSResources(ctx context.Context) error {
 		klog.V(3).Infof("CNS NIC[%d]: Name=%q InterfaceName=%q MacAddress=%q VMUniqueID=%q NetworkID=%q SubnetID=%q Capacity=%d",
 			i, nic.Name, nic.InterfaceName, nic.MacAddress, nic.VMUniqueID, nic.NetworkID, nic.SubnetID, nic.Capacity)
 		devices := np.buildCNSDevices(nic)
-		poolName := fmt.Sprintf("%s-%s", np.nodeName, nic.InterfaceName)
+		poolName := fmt.Sprintf("%s-%s", np.nodeName, cnsNICDeviceName(nic))
 		pools[poolName] = resourceslice.Pool{
 			Slices: []resourceslice.Slice{{Devices: devices}},
 		}
