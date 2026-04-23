@@ -132,18 +132,16 @@ func (np *NetworkDriver) publishCNSResources(ctx context.Context) error {
 
 	logCNSNICChanges(prev, nicResources)
 
-	var devices []resourceapi.Device
+	pools := make(map[string]resourceslice.Pool, len(nicResources))
 	for i := range nicResources {
 		nic := &nicResources[i]
 		klog.V(3).Infof("CNS NIC[%d]: Name=%q InterfaceName=%q MacAddress=%q VMUniqueID=%q NetworkID=%q SubnetID=%q Capacity=%d",
 			i, nic.Name, nic.InterfaceName, nic.MacAddress, nic.VMUniqueID, nic.NetworkID, nic.SubnetID, nic.Capacity)
-		devices = append(devices, np.buildCNSDevices(nic)...)
-	}
-
-	pools := map[string]resourceslice.Pool{
-		np.nodeName: {
+		devices := np.buildCNSDevices(nic)
+		poolName := fmt.Sprintf("%s-%s", np.nodeName, nic.InterfaceName)
+		pools[poolName] = resourceslice.Pool{
 			Slices: []resourceslice.Slice{{Devices: devices}},
-		},
+		}
 	}
 
 	return np.publishCNSPools(ctx, pools)
