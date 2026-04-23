@@ -141,7 +141,7 @@ func (np *NetworkDriver) publishCNSResources(ctx context.Context) error {
 	}
 
 	pools := map[string]resourceslice.Pool{
-		"swift-nics": {
+		np.nodeName: {
 			Slices: []resourceslice.Slice{{Devices: devices}},
 		},
 	}
