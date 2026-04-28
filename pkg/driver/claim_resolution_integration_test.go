@@ -216,8 +216,9 @@ func TestIntegration_PrepareCNSResourceClaim_FastPath(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// NIC state comes from CNS, not netlink — no root required.
-			deviceName := "cns-nic-" + tc.name[:3]
 			deviceMAC := "aa:bb:cc:dd:ee:42"
+			deviceName := sanitizeMACForK8s(deviceMAC)
+			cnsName := "cns-nic-" + tc.name[:3]
 
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
@@ -225,7 +226,7 @@ func TestIntegration_PrepareCNSResourceClaim_FastPath(t *testing.T) {
 					_ = json.NewEncoder(w).Encode(cnsclient.GetNICResourcesResponse{
 						Response: cnsclient.Response{ReturnCode: 0},
 						NICResources: []cnsclient.NICResource{{
-							Name:       deviceName,
+							Name:       cnsName,
 							MacAddress: deviceMAC,
 							SubnetID:   "/subscriptions/sub1/subnets/sn1",
 						}},

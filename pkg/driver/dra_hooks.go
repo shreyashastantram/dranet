@@ -232,8 +232,14 @@ func logCNSNICChanges(prev, curr []cnsclient.NICResource) {
 func (np *NetworkDriver) buildCNSDevices(nic *cnsclient.NICResource) []resourceapi.Device {
 	deviceName := cnsNICDeviceName(nic)
 
-	// networking.azure.com/nic = NIC name (e.g., "eth1")
+	// networking.azure.com/nic = human-readable interface name (e.g., "eth1").
+	// Prefer InterfaceName, then Name, then fall back to MAC-derived deviceName.
 	nicName := deviceName
+	if nic.InterfaceName != "" {
+		nicName = nic.InterfaceName
+	} else if nic.Name != "" {
+		nicName = nic.Name
+	}
 	// networking.azure.com/subnet = extracted subnet name from ARM URI (max 64 bytes for K8s attribute)
 	subnet := extractSubnetName(nic.SubnetID)
 	// networking.azure.com/networkID = network ID from CNS
@@ -531,19 +537,11 @@ func (np *NetworkDriver) prepareCNSResourceClaim(ctx context.Context, claim *res
 	return kubeletplugin.PrepareResult{}
 }
 
-// cnsNICDeviceName returns the device name for a CNS NICResource, using the
-// same naming convention as buildCNSDevices: Name > InterfaceName > sanitized MAC.
+// cnsNICDeviceName returns the stable ResourceSlice device and pool suffix for
+// a CNS NICResource. MAC is the canonical NIC identity because CNS may report
+// Name as either an interface name or a MAC address across NIC types.
 func cnsNICDeviceName(nic *cnsclient.NICResource) string {
-	name := ""
-	if nic.Name != "" {
-		name = nic.Name
-	} else if nic.InterfaceName != "" {
-		name = nic.InterfaceName
-	} else {
-		return sanitizeMACForK8s(nic.MacAddress)
-	}
-	// ResourceSlice device names must be valid RFC 1123 labels (lowercase).
-	return strings.ToLower(name)
+	return sanitizeMACForK8s(nic.MacAddress)
 }
 
 // extractSubnetName extracts the subnet name from an Azure ARM resource URI.
