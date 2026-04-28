@@ -81,7 +81,7 @@ func (np *NetworkDriver) getPodGoalState(ctx context.Context, pod podConsumer, c
 	return infos, nil
 }
 
-func (np *NetworkDriver) populateSwiftV2StoreForDevice(ctx context.Context, pod podConsumer, deviceName, deviceMAC string, claimKey types.NamespacedName, cache map[types.UID][]cnsclient.PodIPInfo) error {
+func (np *NetworkDriver) populateSwiftV2StoreForDevice(ctx context.Context, pod podConsumer, deviceName, deviceMAC string, claimKey types.NamespacedName, shareID string, cache map[types.UID][]cnsclient.PodIPInfo) error {
 	if np.cnsClient == nil {
 		klog.Infof("populateSwiftV2StoreForDevice: cnsClient is nil, skipping for pod %s/%s device %s", pod.Namespace, pod.Name, deviceName)
 		return nil
@@ -120,6 +120,7 @@ func (np *NetworkDriver) populateSwiftV2StoreForDevice(ctx context.Context, pod 
 		return fmt.Errorf("failed to build SwiftV2 config for pod %s/%s device %s: %w", pod.Namespace, pod.Name, deviceName, err)
 	}
 	cfg.Claim = claimKey
+	cfg.ShareID = shareID
 
 	if np.swiftV2Store == nil {
 		np.swiftV2Store = NewSwiftV2PodConfigStore()

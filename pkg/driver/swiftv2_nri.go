@@ -80,7 +80,7 @@ func (np *NetworkDriver) runPodSandboxSwiftV2(ctx context.Context, pod *api.PodS
 			klog.V(2).Infof("SwiftV2 RunPodSandbox: attached shared NIC %s as %s with IPs %v on pod %s/%s",
 				deviceName, networkData.InterfaceName, networkData.IPs, pod.Namespace, pod.Name)
 
-			np.recordSwiftV2DeviceStatus(statusUpdates, cfg.Claim, deviceName, networkData)
+			np.recordSwiftV2DeviceStatus(statusUpdates, cfg.Claim, deviceName, cfg.ShareID, networkData)
 
 		case NICModeDedicated:
 			if cfg.NIC.MAC == "" {
@@ -108,7 +108,7 @@ func (np *NetworkDriver) runPodSandboxSwiftV2(ctx context.Context, pod *api.PodS
 			klog.V(2).Infof("SwiftV2 RunPodSandbox: attached dedicated NIC %s as %s with IPs %v on pod %s/%s",
 				deviceName, networkData.InterfaceName, networkData.IPs, pod.Namespace, pod.Name)
 
-			np.recordSwiftV2DeviceStatus(statusUpdates, cfg.Claim, deviceName, networkData)
+			np.recordSwiftV2DeviceStatus(statusUpdates, cfg.Claim, deviceName, cfg.ShareID, networkData)
 
 		default:
 			klog.Warningf("SwiftV2 RunPodSandbox: unknown NIC mode %q for device %s, skipping", cfg.Mode, deviceName)
@@ -122,11 +122,15 @@ func (np *NetworkDriver) runPodSandboxSwiftV2(ctx context.Context, pod *api.PodS
 // recordSwiftV2DeviceStatus appends an AllocatedDeviceStatus entry for a
 // SwiftV2-attached device to the claim's status apply config, creating the
 // claim entry on first device. networkData carries the runtime-observed
-// interface name, MAC, and IPs returned by nsAttachSwiftV2NIC.
+// interface name, MAC, and IPs returned by nsAttachSwiftV2NIC. shareID is the
+// per-share identifier assigned by the kube-scheduler for ConsumableCapacity
+// devices and is required for the (driver, pool, device, shareID) tuple to
+// match the allocation result.
 func (np *NetworkDriver) recordSwiftV2DeviceStatus(
 	statusUpdates map[types.NamespacedName]*resourceapply.ResourceClaimStatusApplyConfiguration,
 	claimKey types.NamespacedName,
 	deviceName string,
+	shareID string,
 	networkData *resourceapi.NetworkDeviceData,
 ) {
 	if claimKey.Name == "" || np.kubeClient == nil || np.cnsDriverName == "" {
@@ -162,6 +166,9 @@ func (np *NetworkDriver) recordSwiftV2DeviceStatus(
 			WithHardwareAddress(networkData.HardwareAddress).
 			WithIPs(networkData.IPs...),
 		)
+	if shareID != "" {
+		deviceStatus = deviceStatus.WithShareID(shareID)
+	}
 
 	claimStatus.WithDevices(deviceStatus)
 }

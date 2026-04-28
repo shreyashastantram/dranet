@@ -79,6 +79,15 @@ type SwiftV2PodConfig struct {
 	// AllocatedDeviceStatus (interface name, MAC, IPs, conditions) back to
 	// the claim's status after the NIC is attached.
 	Claim types.NamespacedName
+
+	// ShareID is the per-allocation-share identifier the kube-scheduler
+	// assigns when the device has allowMultipleAllocations=true (DRA
+	// ConsumableCapacity). Empty when the device is not shared. The
+	// ResourceClaim status validator requires the (Driver, Pool, Device,
+	// ShareID) tuple of each status.devices[*] entry to exactly match an
+	// entry in status.allocation.devices.results, so we round-trip it from
+	// the allocation result through the SwiftV2 store into the apply config.
+	ShareID string
 }
 
 // SwiftV2PodConfigStore provides pod-UID-keyed storage for NRI plugin lookups.

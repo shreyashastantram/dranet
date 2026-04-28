@@ -520,13 +520,24 @@ func (np *NetworkDriver) prepareCNSResourceClaim(ctx context.Context, claim *res
 		klog.Infof("prepareCNSResourceClaim: device %q resolved from CNS NIC state: MAC=%q SubnetID=%q",
 			deviceName, deviceMAC, nic.SubnetID)
 
+		// Capture the per-share identifier assigned by the scheduler for
+		// devices with DRAConsumableCapacity (allowMultipleAllocations=true).
+		// The API server's ResourceClaim status validator requires the
+		// (driver, pool, device, shareID) tuple to exactly match an entry
+		// in status.allocation.devices.results, so we must thread shareID
+		// through to the NRI hook that publishes status.devices.
+		var shareID string
+		if result.ShareID != nil {
+			shareID = string(*result.ShareID)
+		}
+
 		// Query CNS GetPodGoalState for each pod consumer and store the
 		// per-pod networking config in SwiftV2PodConfigStore for the NRI hook.
 		for _, pod := range podConsumers {
-			klog.Infof("prepareCNSResourceClaim: populating SwiftV2 store for pod %s/%s UID=%s device=%q MAC=%q",
-				pod.Namespace, pod.Name, pod.UID, deviceName, deviceMAC)
+			klog.Infof("prepareCNSResourceClaim: populating SwiftV2 store for pod %s/%s UID=%s device=%q MAC=%q shareID=%q",
+				pod.Namespace, pod.Name, pod.UID, deviceName, deviceMAC, shareID)
 			claimKey := types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}
-			if err := np.populateSwiftV2StoreForDevice(ctx, pod, deviceName, deviceMAC, claimKey, goalStateByPod); err != nil {
+			if err := np.populateSwiftV2StoreForDevice(ctx, pod, deviceName, deviceMAC, claimKey, shareID, goalStateByPod); err != nil {
 				klog.Errorf("prepareCNSResourceClaim: populateSwiftV2StoreForDevice failed for pod %s/%s device %q: %v",
 					pod.Namespace, pod.Name, deviceName, err)
 				errorList = append(errorList, err)
