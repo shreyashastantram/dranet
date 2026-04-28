@@ -151,7 +151,7 @@ func (np *NetworkDriver) RunPodSandbox(ctx context.Context, pod *api.PodSandbox)
 	// Process SwiftV2 devices if present.
 	if swiftV2Configs != nil {
 		klog.Infof("DEBUG RunPodSandbox Pod %s/%s: entering SwiftV2 path (runPodSandboxSwiftV2) with %d configs", pod.Namespace, pod.Name, len(swiftV2Configs))
-		err := np.runPodSandboxSwiftV2(pod, swiftV2Configs)
+		err := np.runPodSandboxSwiftV2(ctx, pod, swiftV2Configs)
 		if err != nil {
 			klog.Infof("DEBUG RunPodSandbox Pod %s/%s: SwiftV2 path FAILED: %v", pod.Namespace, pod.Name, err)
 			status = statusFailed

@@ -57,6 +57,11 @@ const (
 
 	// Consumable capacity key (KEP-5075)
 	cnsCapSlots = "networking.azure.com/slots"
+
+	// delegatedNICsPoolName is the ResourceSlice pool name used by the CNS
+	// publisher to expose all delegated NIC devices for a node under a
+	// single, well-known pool.
+	delegatedNICsPoolName = "delegated-nics"
 )
 
 // DRA hooks exposes Network Devices to Kubernetes, the Network devices and its attributes are
@@ -132,15 +137,17 @@ func (np *NetworkDriver) publishCNSResources(ctx context.Context) error {
 
 	logCNSNICChanges(prev, nicResources)
 
-	pools := make(map[string]resourceslice.Pool, len(nicResources))
+	pools := make(map[string]resourceslice.Pool, 1)
+	allDevices := make([]resourceapi.Device, 0, len(nicResources))
 	for i := range nicResources {
 		nic := &nicResources[i]
 		klog.V(3).Infof("CNS NIC[%d]: Name=%q InterfaceName=%q MacAddress=%q VMUniqueID=%q NetworkID=%q SubnetID=%q Capacity=%d",
 			i, nic.Name, nic.InterfaceName, nic.MacAddress, nic.VMUniqueID, nic.NetworkID, nic.SubnetID, nic.Capacity)
-		devices := np.buildCNSDevices(nic)
-		poolName := fmt.Sprintf("%s-%s", np.nodeName, cnsNICDeviceName(nic))
-		pools[poolName] = resourceslice.Pool{
-			Slices: []resourceslice.Slice{{Devices: devices}},
+		allDevices = append(allDevices, np.buildCNSDevices(nic)...)
+	}
+	if len(allDevices) > 0 {
+		pools[delegatedNICsPoolName] = resourceslice.Pool{
+			Slices: []resourceslice.Slice{{Devices: allDevices}},
 		}
 	}
 

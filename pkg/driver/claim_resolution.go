@@ -119,6 +119,7 @@ func (np *NetworkDriver) populateSwiftV2StoreForDevice(ctx context.Context, pod 
 	if err != nil {
 		return fmt.Errorf("failed to build SwiftV2 config for pod %s/%s device %s: %w", pod.Namespace, pod.Name, deviceName, err)
 	}
+	cfg.Claim = claimKey
 
 	if np.swiftV2Store == nil {
 		np.swiftV2Store = NewSwiftV2PodConfigStore()

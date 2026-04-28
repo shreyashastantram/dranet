@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -48,7 +49,7 @@ func TestRunPodSandboxSwiftV2_SharedHappyPath(t *testing.T) {
 		},
 	}
 
-	if err := np.runPodSandboxSwiftV2(testSwiftV2Pod("/run/netns/pod-a"), cfgs); err != nil {
+	if err := np.runPodSandboxSwiftV2(context.Background(), testSwiftV2Pod("/run/netns/pod-a"), cfgs); err != nil {
 		t.Fatalf("runPodSandboxSwiftV2 failed: %v", err)
 	}
 	if called != 1 {
@@ -92,7 +93,7 @@ func TestRunPodSandboxSwiftV2_DedicatedHappyPath(t *testing.T) {
 		},
 	}
 
-	if err := np.runPodSandboxSwiftV2(testSwiftV2Pod("/run/netns/pod-b"), cfgs); err != nil {
+	if err := np.runPodSandboxSwiftV2(context.Background(), testSwiftV2Pod("/run/netns/pod-b"), cfgs); err != nil {
 		t.Fatalf("runPodSandboxSwiftV2 failed: %v", err)
 	}
 	if called != 1 {
@@ -123,7 +124,7 @@ func TestRunPodSandboxSwiftV2_DedicatedAlreadyMovedSkipsAttach(t *testing.T) {
 		},
 	}
 
-	if err := np.runPodSandboxSwiftV2(testSwiftV2Pod("/run/netns/pod-c"), cfgs); err != nil {
+	if err := np.runPodSandboxSwiftV2(context.Background(), testSwiftV2Pod("/run/netns/pod-c"), cfgs); err != nil {
 		t.Fatalf("runPodSandboxSwiftV2 failed: %v", err)
 	}
 }

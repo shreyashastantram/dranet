@@ -73,6 +73,12 @@ type SwiftV2PodConfig struct {
 	// inside the pod's network namespace. Reuses the existing apis.NetworkConfig
 	// type for compatibility with the upstream route/address application logic.
 	InterfaceConfig apis.NetworkConfig
+
+	// Claim identifies the ResourceClaim this device was allocated from.
+	// Mirrors PodConfig.Claim so the NRI plugin can publish
+	// AllocatedDeviceStatus (interface name, MAC, IPs, conditions) back to
+	// the claim's status after the NIC is attached.
+	Claim types.NamespacedName
 }
 
 // SwiftV2PodConfigStore provides pod-UID-keyed storage for NRI plugin lookups.

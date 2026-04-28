@@ -156,16 +156,22 @@ func nsAttachIPVlanL3(cfg *NICConfig, containerNsPath string) (*resourceapi.Netw
 			return nil, fmt.Errorf("failed to look up ipvlan %s on host: %w", ipvlName, err)
 		}
 
-		// No existing child — create a fresh ipvlan L3 sub-interface.
+		// No existing child — create a fresh ipvlan L3S sub-interface.
+		// L3S (symmetric L3) ensures that on RX the netfilter and IP-input
+		// hooks run in the slave's network namespace, allowing the pod's
+		// kernel to actually deliver inbound packets to local sockets and
+		// generate replies. Plain L3 mode runs RX hooks in the parent's
+		// (host) netns, which silently drops intra-host slave-to-slave
+		// traffic because the host has no local IP for the destination.
 		newIPVL := &netlink.IPVlan{
 			LinkAttrs: netlink.LinkAttrs{
 				Name:        ipvlName,
 				ParentIndex: parent.Attrs().Index,
 			},
-			Mode: netlink.IPVLAN_MODE_L3,
+			Mode: netlink.IPVLAN_MODE_L3S,
 		}
 		if err := netlink.LinkAdd(newIPVL); err != nil {
-			return nil, fmt.Errorf("failed to create ipvlan L3 interface %s on parent (MAC %s): %w", ipvlName, cfg.MAC, err)
+			return nil, fmt.Errorf("failed to create ipvlan L3S interface %s on parent (MAC %s): %w", ipvlName, cfg.MAC, err)
 		}
 		ipvl, err = nlwrap.LinkByName(ipvlName)
 		if err != nil {
