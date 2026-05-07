@@ -15,4 +15,4 @@ spec:
       - name: pod-net
   resourceClaims:
   - name: pod-net
-    resourceClaimTemplateName: cxsub-shared-rct
+    resourceClaimTemplateName: sharedcxsub1-shared-rct
