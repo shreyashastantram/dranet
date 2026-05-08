@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"syscall"
 
 	"github.com/vishvananda/netlink"
@@ -34,12 +35,6 @@ const (
 	// swiftV2VirtualGW is the Azure virtual gateway IP used by SwiftV2 for
 	// delegated NIC routing. This matches the CNS middleware constant.
 	swiftV2VirtualGW = "169.254.2.1"
-
-	// swiftV2VirtualGWMAC is the well-known MAC address that Azure VFP uses
-	// for the virtual gateway on delegated NICs. ipvlan L3 interfaces have
-	// NOARP set, so they cannot ARP-resolve the gateway; a static neighbor
-	// entry with this MAC is required for cross-node traffic to flow.
-	swiftV2VirtualGWMAC = "12:34:56:78:9a:bc"
 
 	// swiftV2DelegatedIfName is the interface name assigned to delegated NICs
 	// inside the pod namespace (both shared ipvlan children and dedicated NICs
@@ -156,22 +151,33 @@ func nsAttachIPVlanL3(cfg *NICConfig, containerNsPath string) (*resourceapi.Netw
 			return nil, fmt.Errorf("failed to look up ipvlan %s on host: %w", ipvlName, err)
 		}
 
-		// No existing child — create a fresh ipvlan L3S sub-interface.
-		// L3S (symmetric L3) ensures that on RX the netfilter and IP-input
-		// hooks run in the slave's network namespace, allowing the pod's
-		// kernel to actually deliver inbound packets to local sockets and
-		// generate replies. Plain L3 mode runs RX hooks in the parent's
-		// (host) netns, which silently drops intra-host slave-to-slave
-		// traffic because the host has no local IP for the destination.
+		// No existing child — create a fresh ipvlan L3 sub-interface.
+		//
+		// Mode rationale (L3, not L3S):
+		//   * L3 places the FIB lookup, RPF and netfilter hooks for slave
+		//     traffic in the *parent's* (host) network namespace. The host's
+		//     rp_filter=2 (loose) setting therefore actually applies to pod
+		//     egress, and there is no ambiguity about which netns runs RPF.
+		//   * L3S would run those hooks in the slave (pod) netns where rp_filter
+		//     defaults to 1 (strict) and would reject the asymmetric reverse
+		//     path that SwiftV2 prefix-on-NIC inherently has (host-FIB has
+		//     no per-pod /32 in the slave's view).
+		//   * L3 with bridge sub-mode (default for ipvlan) still delivers
+		//     intra-master cross-slave traffic correctly: the ipvlan driver
+		//     demuxes by destination IP. The receiving slave's L2 admittance
+		//     check passes because every slave shares the parent's MAC, and
+		//     the static neighbor entry installed below uses the parent's
+		//     real MAC (not a synthetic placeholder), so frames carry a dst
+		//     MAC that matches every slave's own address.
 		newIPVL := &netlink.IPVlan{
 			LinkAttrs: netlink.LinkAttrs{
 				Name:        ipvlName,
 				ParentIndex: parent.Attrs().Index,
 			},
-			Mode: netlink.IPVLAN_MODE_L3S,
+			Mode: netlink.IPVLAN_MODE_L3,
 		}
 		if err := netlink.LinkAdd(newIPVL); err != nil {
-			return nil, fmt.Errorf("failed to create ipvlan L3S interface %s on parent (MAC %s): %w", ipvlName, cfg.MAC, err)
+			return nil, fmt.Errorf("failed to create ipvlan L3 interface %s on parent (MAC %s): %w", ipvlName, cfg.MAC, err)
 		}
 		ipvl, err = nlwrap.LinkByName(ipvlName)
 		if err != nil {
@@ -238,17 +244,28 @@ func nsAttachIPVlanL3(cfg *NICConfig, containerNsPath string) (*resourceapi.Netw
 		return nil, fmt.Errorf("failed to bring up %s: %w", swiftV2DelegatedIfName, err)
 	}
 
-	// Add static neighbor entry for the Azure virtual gateway. ipvlan L3
-	// interfaces have NOARP set, so they cannot ARP-resolve 169.254.2.1.
-	// Without this entry, cross-node traffic (which goes via the default
-	// route through the gateway) silently fails.
-	gwMAC, err := net.ParseMAC(swiftV2VirtualGWMAC)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse gateway MAC %s: %w", swiftV2VirtualGWMAC, err)
-	}
+	// Add static neighbor entry for the Azure virtual gateway.
+	//
+	// ipvlan L3 interfaces have NOARP set, so the kernel cannot resolve
+	// 169.254.2.1 via ARP. Without this entry, the pod's outbound frames
+	// would be dropped before egress.
+	//
+	// We use the *parent NIC's real MAC* (not a synthetic placeholder).
+	// Reason: ipvlan slaves share the parent's MAC. For same-host cross-slave
+	// traffic, the ipvlan bridge sub-mode delivers the frame directly from
+	// one slave to another without going to wire. The receiving slave then
+	// runs the standard "is dst MAC mine?" L2 admittance check; with the
+	// parent's real MAC this check passes (every slave shares it). With a
+	// fake/placeholder MAC the check fails and the frame is dropped silently
+	// before the IP stack ever sees it. For off-host traffic the SmartNIC
+	// ignores L2 entirely, so either MAC value works there.
 	gwIP := net.ParseIP(cfg.GatewayIP)
 	if gwIP == nil {
 		return nil, fmt.Errorf("invalid gateway IP: %s", cfg.GatewayIP)
+	}
+	gwMAC := parent.Attrs().HardwareAddr
+	if len(gwMAC) == 0 {
+		return nil, fmt.Errorf("parent NIC %s has empty MAC address", parent.Attrs().Name)
 	}
 	neighEntry := &netlink.Neigh{
 		LinkIndex:    nsLink.Attrs().Index,
@@ -256,8 +273,8 @@ func nsAttachIPVlanL3(cfg *NICConfig, containerNsPath string) (*resourceapi.Netw
 		HardwareAddr: gwMAC,
 		State:        netlink.NUD_PERMANENT,
 	}
-	if err := nhNs.NeighAdd(neighEntry); err != nil && !errors.Is(err, syscall.EEXIST) {
-		return nil, fmt.Errorf("failed to add static neighbor %s -> %s: %w", cfg.GatewayIP, swiftV2VirtualGWMAC, err)
+	if err := nhNs.NeighSet(neighEntry); err != nil {
+		return nil, fmt.Errorf("failed to set static neighbor %s -> %s on pod eth1: %w", cfg.GatewayIP, gwMAC, err)
 	}
 
 	// Add gateway /32 scope link route (gateway reachable directly on link).
@@ -271,15 +288,39 @@ func nsAttachIPVlanL3(cfg *NICConfig, containerNsPath string) (*resourceapi.Netw
 	}
 
 	// Add default route via gateway.
+	//
+	// Use RouteReplace (not RouteAdd): the cluster CNI plugin runs *before*
+	// the dranet NRI hook and will already have installed a default route
+	// via the pod's cluster-network interface (eth0). RouteAdd would return
+	// EEXIST and the cluster default would win, leaving SwiftV2 pod egress
+	// to non-prefix destinations going out eth0 instead of the delegated
+	// NIC. We deliberately override that default so all pod egress flows
+	// through eth1 → SmartNIC → VFP/SDN policy.
 	_, defaultDst, _ := net.ParseCIDR("0.0.0.0/0")
 	defaultRoute := netlink.Route{
 		Dst:       defaultDst,
 		Gw:        gwIP,
 		LinkIndex: nsLink.Attrs().Index,
 	}
-	if err := nhNs.RouteAdd(&defaultRoute); err != nil && !errors.Is(err, syscall.EEXIST) {
-		return nil, fmt.Errorf("failed to add default route via %s: %w", cfg.GatewayIP, err)
+	if err := nhNs.RouteReplace(&defaultRoute); err != nil {
+		return nil, fmt.Errorf("failed to replace default route via %s: %w", cfg.GatewayIP, err)
 	}
+
+	// --- Host sysctl: loose RPF on parent and "all" ---
+	//
+	// Pod replies arrive on the parent eth1 from the SmartNIC. The host's
+	// FIB has only a /32 to the pod IP via the parent and no per-pod source
+	// route, so a strict RPF check on the parent (`from src=<podIP>` resolves
+	// via parent? yes via the /32) is symmetric for the *destination* path
+	// but the *source* check on packets the parent receives that are sourced
+	// from another customer-VNet endpoint may not have a return-path entry,
+	// causing strict RPF to drop them silently. Loose RPF (mode 2) only
+	// requires that the source be reachable via *any* interface, which is
+	// always true for valid VNet traffic.
+	//
+	// The kernel takes MAX(all/rp_filter, <iface>/rp_filter) for ingress, so
+	// both must be set. Best-effort; sysctls may not exist on minimal kernels.
+	setRPFilterLoose(parent.Attrs().Name)
 
 	return &resourceapi.NetworkDeviceData{
 		InterfaceName:   swiftV2DelegatedIfName,
@@ -476,14 +517,19 @@ func nsAttachDedicatedNIC(cfg *NICConfig, containerNsPath string) (*resourceapi.
 	}
 
 	// Add default route via virtual gateway.
+	//
+	// Use RouteReplace (not RouteAdd): see the matching block in
+	// nsAttachIPVlanL3 — the cluster CNI plugin installs an eth0 default
+	// before our NRI hook runs, so we must override it to ensure all pod
+	// egress leaves through the delegated NIC (and thus the SmartNIC).
 	_, defaultDst, _ := net.ParseCIDR("0.0.0.0/0")
 	defaultRoute := netlink.Route{
 		Dst:       defaultDst,
 		Gw:        gwIP,
 		LinkIndex: nsLink.Attrs().Index,
 	}
-	if err := nhNs.RouteAdd(&defaultRoute); err != nil && !errors.Is(err, syscall.EEXIST) {
-		return nil, fmt.Errorf("failed to add default route via %s: %w", cfg.GatewayIP, err)
+	if err := nhNs.RouteReplace(&defaultRoute); err != nil {
+		return nil, fmt.Errorf("failed to replace default route via %s: %w", cfg.GatewayIP, err)
 	}
 
 	// Issue DHCP discover in background to create DNS mapping in host via wireserver.
@@ -592,4 +638,26 @@ func truncateUID(uid string) string {
 		return uid[:8]
 	}
 	return uid
+}
+
+// setRPFilterLoose sets reverse path filtering to "loose" (mode 2) on the
+// specified interface and on the kernel's "all" pseudo-interface.
+//
+// The kernel takes MAX(all/rp_filter, <iface>/rp_filter) for ingress, so
+// both must be set to ensure loose semantics on the parent. Loose RPF is
+// required for SwiftV2 prefix-on-NIC because the host FIB does not have a
+// per-source return-path entry for arbitrary customer-VNet endpoints — the
+// SmartNIC handles all that — and strict RPF would silently drop their
+// frames as "martians" from the host's perspective.
+//
+// Best-effort: errors are logged but do not fail Prepare.
+func setRPFilterLoose(ifName string) {
+	for _, p := range []string{
+		"/proc/sys/net/ipv4/conf/" + ifName + "/rp_filter",
+		"/proc/sys/net/ipv4/conf/all/rp_filter",
+	} {
+		if err := os.WriteFile(p, []byte("2\n"), 0644); err != nil {
+			klog.Warningf("SwiftV2: failed to set %s=2 (loose RPF): %v", p, err)
+		}
+	}
 }
