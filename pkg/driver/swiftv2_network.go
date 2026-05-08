@@ -102,6 +102,30 @@ func nsAttachIPVlanL3(cfg *NICConfig, containerNsPath string) (*resourceapi.Netw
 		}
 	}
 
+	// Assign the host-underlay primary IP to the parent NIC if CNS provided one.
+	//
+	// This is the address NMAgent provisions as the NIC's primary CA on the
+	// SwiftV2 fabric — VFP/SmartNIC expect host-originated frames from this
+	// NIC to be sourced from this IP. Assigning it has two effects:
+	//   1. The host gets an L3 identity in the customer prefix, so it can
+	//      ARP/source frames belonging to the SwiftV2 NIC.
+	//   2. The kernel installs a connected route for the prefix on the
+	//      parent NIC, so the host's main FIB resolves any address in the
+	//      prefix as directly attached on this interface.
+	//
+	// AddrReplace is idempotent: subsequent shared pods on the same parent
+	// NIC will see the address already present and the call is a no-op.
+	if cfg.HostPrimaryIP != "" && cfg.SubnetPrefix > 0 {
+		addrCIDR := fmt.Sprintf("%s/%d", cfg.HostPrimaryIP, cfg.SubnetPrefix)
+		addr, err := netlink.ParseAddr(addrCIDR)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse host primary IP %s: %w", addrCIDR, err)
+		}
+		if err := netlink.AddrReplace(parent, addr); err != nil {
+			return nil, fmt.Errorf("failed to assign host primary IP %s to %s: %w", addrCIDR, parent.Attrs().Name, err)
+		}
+	}
+
 	// Compute the deterministic ipvlan child name (first 8 chars of PodUID).
 	ipvlName := fmt.Sprintf("ipvl-%s", truncateUID(cfg.PodUID))
 

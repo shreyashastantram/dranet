@@ -56,6 +56,13 @@ type NICConfig struct {
 	SubnetPrefix int
 	// PodUID is used for naming the ipvlan child interface (shared mode only, first 8 chars).
 	PodUID string
+	// HostPrimaryIP is the host-underlay IP for the delegated NIC (shared mode
+	// only). This is the address NMAgent provisions as the NIC's primary CA on
+	// the SwiftV2 fabric. dranet assigns it to the parent NIC on the host so
+	// the host has an L3 identity in the customer prefix and the kernel
+	// installs a connected route for the prefix on eth1. Sourced from
+	// CNS PodIPInfo.NetworkContainerPrimaryIPConfig.PrimaryIP.
+	HostPrimaryIP string
 }
 
 // SwiftV2PodConfig holds the pre-computed networking configuration for a single

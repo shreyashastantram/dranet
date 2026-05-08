@@ -33,7 +33,7 @@ func TestBuildSwiftV2PodConfigShared(t *testing.T) {
 		NetworkContainerPrimaryIPConfig: cnsclient.IPConfiguration{GatewayIPAddress: "169.254.2.1"},
 		MacAddress:                      "aa:bb:cc:dd:ee:01",
 		SharedNIC:                       true,
-	})
+	}, "10.0.0.1")
 	if err != nil {
 		t.Fatalf("buildSwiftV2PodConfig() failed: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestBuildSwiftV2PodConfigDedicated(t *testing.T) {
 	cfg, err := buildSwiftV2PodConfig(types.UID("pod-uid-1"), cnsclient.PodIPInfo{
 		PodIPConfig: cnsclient.IPSubnet{IPAddress: "10.0.0.20", PrefixLength: 24},
 		MacAddress:  "aa:bb:cc:dd:ee:02",
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("buildSwiftV2PodConfig() failed: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestPopulateSwiftV2StoreForDevice(t *testing.T) {
 
 	pod := podConsumer{UID: types.UID("pod-uid-1"), Name: "pod-a", Namespace: "ns-a"}
 	cache := map[types.UID][]cnsclient.PodIPInfo{}
-	if err := np.populateSwiftV2StoreForDevice(context.Background(), pod, "eth1", "aa:bb:cc:dd:ee:01", types.NamespacedName{Namespace: "ns-a", Name: "claim-a"}, "", cache); err != nil {
+	if err := np.populateSwiftV2StoreForDevice(context.Background(), pod, "eth1", "aa:bb:cc:dd:ee:01", "", types.NamespacedName{Namespace: "ns-a", Name: "claim-a"}, "", cache); err != nil {
 		t.Fatalf("populateSwiftV2StoreForDevice() failed: %v", err)
 	}
 

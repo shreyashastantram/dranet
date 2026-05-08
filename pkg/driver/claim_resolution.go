@@ -81,13 +81,13 @@ func (np *NetworkDriver) getPodGoalState(ctx context.Context, pod podConsumer, c
 	return infos, nil
 }
 
-func (np *NetworkDriver) populateSwiftV2StoreForDevice(ctx context.Context, pod podConsumer, deviceName, deviceMAC string, claimKey types.NamespacedName, shareID string, cache map[types.UID][]cnsclient.PodIPInfo) error {
+func (np *NetworkDriver) populateSwiftV2StoreForDevice(ctx context.Context, pod podConsumer, deviceName, deviceMAC, hostPrimaryIP string, claimKey types.NamespacedName, shareID string, cache map[types.UID][]cnsclient.PodIPInfo) error {
 	if np.cnsClient == nil {
 		klog.Infof("populateSwiftV2StoreForDevice: cnsClient is nil, skipping for pod %s/%s device %s", pod.Namespace, pod.Name, deviceName)
 		return nil
 	}
 
-	klog.Infof("populateSwiftV2StoreForDevice: fetching goal state for pod %s/%s device=%q MAC=%q", pod.Namespace, pod.Name, deviceName, deviceMAC)
+	klog.Infof("populateSwiftV2StoreForDevice: fetching goal state for pod %s/%s device=%q MAC=%q hostPrimaryIP=%q", pod.Namespace, pod.Name, deviceName, deviceMAC, hostPrimaryIP)
 	infos, err := np.getPodGoalState(ctx, pod, cache)
 	if err != nil {
 		return err
@@ -115,7 +115,7 @@ func (np *NetworkDriver) populateSwiftV2StoreForDevice(ctx context.Context, pod 
 			pod.Namespace, pod.Name, deviceName, err)
 	}
 
-	cfg, err := buildSwiftV2PodConfig(pod.UID, info)
+	cfg, err := buildSwiftV2PodConfig(pod.UID, info, hostPrimaryIP)
 	if err != nil {
 		return fmt.Errorf("failed to build SwiftV2 config for pod %s/%s device %s: %w", pod.Namespace, pod.Name, deviceName, err)
 	}
@@ -158,7 +158,7 @@ func normalizeMAC(mac string) (string, bool) {
 	return strings.ToLower(parsed.String()), true
 }
 
-func buildSwiftV2PodConfig(podUID types.UID, info cnsclient.PodIPInfo) (SwiftV2PodConfig, error) {
+func buildSwiftV2PodConfig(podUID types.UID, info cnsclient.PodIPInfo, hostPrimaryIP string) (SwiftV2PodConfig, error) {
 	if info.MacAddress == "" {
 		return SwiftV2PodConfig{}, fmt.Errorf("missing MAC address")
 	}
@@ -198,6 +198,7 @@ func buildSwiftV2PodConfig(podUID types.UID, info cnsclient.PodIPInfo) (SwiftV2P
 		cfg.NIC.PodIP = info.PodIPConfig.IPAddress
 		cfg.NIC.SubnetPrefix = prefixLength
 		cfg.NIC.PodUID = string(podUID)
+		cfg.NIC.HostPrimaryIP = hostPrimaryIP
 		cfg.InterfaceConfig.Interface.Addresses = []string{fmt.Sprintf("%s/32", info.PodIPConfig.IPAddress)}
 		return cfg, nil
 	}

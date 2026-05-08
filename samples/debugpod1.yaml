@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: debugpod1
+  name: debugpod4
   namespace: default
   labels:
     kubernetes.azure.com/pod-network-instance: cust-pni
@@ -9,7 +9,7 @@ spec:
   containers:
   - name: netshoot
     image: nicolaka/netshoot:latest
-    command: ["sleep", "infinity"]
+    command: [ "sleep", "infinity" ]
     resources:
       claims:
       - name: pod-net

@@ -533,11 +533,14 @@ func (np *NetworkDriver) prepareCNSResourceClaim(ctx context.Context, claim *res
 
 		// Query CNS GetPodGoalState for each pod consumer and store the
 		// per-pod networking config in SwiftV2PodConfigStore for the NRI hook.
+		// The NIC's host-underlay PrimaryIP (when CNS provides it via the
+		// NICNetworkConfig CRD) is threaded through here so the prepare
+		// hook can assign it to the parent NIC on the host.
 		for _, pod := range podConsumers {
-			klog.Infof("prepareCNSResourceClaim: populating SwiftV2 store for pod %s/%s UID=%s device=%q MAC=%q shareID=%q",
-				pod.Namespace, pod.Name, pod.UID, deviceName, deviceMAC, shareID)
+			klog.Infof("prepareCNSResourceClaim: populating SwiftV2 store for pod %s/%s UID=%s device=%q MAC=%q hostPrimaryIP=%q shareID=%q",
+				pod.Namespace, pod.Name, pod.UID, deviceName, deviceMAC, nic.PrimaryIP, shareID)
 			claimKey := types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}
-			if err := np.populateSwiftV2StoreForDevice(ctx, pod, deviceName, deviceMAC, claimKey, shareID, goalStateByPod); err != nil {
+			if err := np.populateSwiftV2StoreForDevice(ctx, pod, deviceName, deviceMAC, nic.PrimaryIP, claimKey, shareID, goalStateByPod); err != nil {
 				klog.Errorf("prepareCNSResourceClaim: populateSwiftV2StoreForDevice failed for pod %s/%s device %q: %v",
 					pod.Namespace, pod.Name, deviceName, err)
 				errorList = append(errorList, err)

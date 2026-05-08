@@ -42,6 +42,13 @@ type NICResource struct {
 	VMUniqueID    string `json:"vmUniqueID,omitempty"`
 	SubnetID      string `json:"subnetID,omitempty"`
 	Capacity      int    `json:"capacity,omitempty"`
+	// PrimaryIP is the host-underlay primary IP for the NIC (the address
+	// NMAgent provisions as the NIC's primary CA on the SwiftV2 fabric).
+	// CNS sources this from the NICNetworkConfig CRD and strips the prefix
+	// length, so this is a bare IPv4 address (e.g., "165.0.0.16").
+	// Empty when the CNS server doesn't provide it (older CNS or no
+	// NICNetworkConfig CRD for this NIC).
+	PrimaryIP string `json:"primaryIP,omitempty"`
 }
 
 // Response represents the CNS API response status.
