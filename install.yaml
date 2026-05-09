@@ -124,7 +124,7 @@ spec:
         - /dranet
         - --v=4
         - --hostname-override=$(NODE_NAME)
-        image: acndev.azurecr.io/dranet:v20260508-e535203
+        image: acndev.azurecr.io/dranet:v20260509-bf23d69
         env:
         - name: NODE_NAME
           valueFrom:
@@ -254,4 +254,5 @@ spec:
           parameters:
             dedicated: true # Tells CNS this is dedicated mode
 ---
+
 
