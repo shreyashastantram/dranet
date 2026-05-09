@@ -51,6 +51,28 @@ func TestBuildSwiftV2PodConfigShared(t *testing.T) {
 	}
 }
 
+// TestBuildSwiftV2PodConfigSharedHostPrimaryIPCIDR verifies that when CNS
+// returns the host primary IP as a CIDR using the subnet address-space
+// width, dranet uses the IP as HostPrimaryIP and overrides SubnetPrefix
+// with the subnet width (not the narrower NC prefix from PodIPConfig).
+func TestBuildSwiftV2PodConfigSharedHostPrimaryIPCIDR(t *testing.T) {
+	cfg, err := buildSwiftV2PodConfig(types.UID("pod-uid-1"), cnsclient.PodIPInfo{
+		PodIPConfig:                     cnsclient.IPSubnet{IPAddress: "165.0.0.17", PrefixLength: 28},
+		NetworkContainerPrimaryIPConfig: cnsclient.IPConfiguration{GatewayIPAddress: "169.254.2.1"},
+		MacAddress:                      "7c:1e:52:07:01:ba",
+		SharedNIC:                       true,
+	}, "165.0.0.16/20")
+	if err != nil {
+		t.Fatalf("buildSwiftV2PodConfig() failed: %v", err)
+	}
+	if cfg.NIC.HostPrimaryIP != "165.0.0.16" {
+		t.Fatalf("HostPrimaryIP: want 165.0.0.16, got %q", cfg.NIC.HostPrimaryIP)
+	}
+	if cfg.NIC.SubnetPrefix != 20 {
+		t.Fatalf("SubnetPrefix: want 20 (subnet width), got %d", cfg.NIC.SubnetPrefix)
+	}
+}
+
 func TestBuildSwiftV2PodConfigDedicated(t *testing.T) {
 	cfg, err := buildSwiftV2PodConfig(types.UID("pod-uid-1"), cnsclient.PodIPInfo{
 		PodIPConfig: cnsclient.IPSubnet{IPAddress: "10.0.0.20", PrefixLength: 24},

@@ -198,7 +198,23 @@ func buildSwiftV2PodConfig(podUID types.UID, info cnsclient.PodIPInfo, hostPrima
 		cfg.NIC.PodIP = info.PodIPConfig.IPAddress
 		cfg.NIC.SubnetPrefix = prefixLength
 		cfg.NIC.PodUID = string(podUID)
-		cfg.NIC.HostPrimaryIP = hostPrimaryIP
+		// hostPrimaryIP arrives from CNS GetNICResources as a CIDR using the
+		// *subnet* address-space prefix (e.g., "165.0.0.16/20"). Split into:
+		//   - cfg.NIC.HostPrimaryIP: the bare IP (e.g., "165.0.0.16")
+		//   - cfg.NIC.SubnetPrefix:  the subnet width (e.g., 20) — overrides
+		//     the NC prefix-on-NIC width from PodIPConfig (e.g., 28).
+		// The subnet width is what we want to assign to the parent NIC on
+		// the host so the auto-generated connected route covers every pod
+		// IP in the customer subnet (including pods on other NICs in the
+		// same subnet), not just this NIC's narrow NC prefix.
+		if hostPrimaryIP != "" {
+			if ip, prefix, ok := splitHostPrimaryIPCIDR(hostPrimaryIP); ok {
+				cfg.NIC.HostPrimaryIP = ip
+				cfg.NIC.SubnetPrefix = prefix
+			} else {
+				cfg.NIC.HostPrimaryIP = hostPrimaryIP
+			}
+		}
 		cfg.InterfaceConfig.Interface.Addresses = []string{fmt.Sprintf("%s/32", info.PodIPConfig.IPAddress)}
 		return cfg, nil
 	}
@@ -206,6 +222,27 @@ func buildSwiftV2PodConfig(podUID types.UID, info cnsclient.PodIPInfo, hostPrima
 	cfg.Mode = NICModeDedicated
 	cfg.NIC.Addresses = []string{addressCIDR}
 	return cfg, nil
+}
+
+// splitHostPrimaryIPCIDR parses a CIDR string like "165.0.0.16/20" into the
+// bare IP ("165.0.0.16") and the prefix length (20). Returns ok=false when
+// the input doesn't carry a prefix or the prefix isn't a positive integer.
+func splitHostPrimaryIPCIDR(cidr string) (ip string, prefix int, ok bool) {
+	idx := strings.IndexByte(cidr, '/')
+	if idx <= 0 || idx+1 >= len(cidr) {
+		return "", 0, false
+	}
+	ip = cidr[:idx]
+	for _, c := range cidr[idx+1:] {
+		if c < '0' || c > '9' {
+			return "", 0, false
+		}
+		prefix = prefix*10 + int(c-'0')
+	}
+	if prefix <= 0 || prefix > 32 {
+		return "", 0, false
+	}
+	return ip, prefix, true
 }
 
 // validatePodIPInfo checks that a CNS PodIPInfo has the required fields
