@@ -1,15 +1,19 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: dedicateddebugpod4
+  name: dedicateddebugpod2
   namespace: default
   labels:
-    kubernetes.azure.com/pod-network-instance: cust-pni2
+    kubernetes.azure.com/pod-network-instance: cust-pni3
 spec:
   containers:
   - name: netshoot
     image: nicolaka/netshoot:latest
-    command: ["sleep", "infinity"]
+    command: [ "sleep", "infinity" ]
+    securityContext:
+      privileged: true
+      capabilities:
+        add: [ "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_PTRACE" ]
     resources:
       claims:
       - name: pod-net

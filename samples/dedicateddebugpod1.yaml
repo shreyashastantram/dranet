@@ -9,7 +9,11 @@ spec:
   containers:
   - name: netshoot
     image: nicolaka/netshoot:latest
-    command: ["sleep", "infinity"]
+    command: [ "sleep", "infinity" ]
+    securityContext:
+      privileged: true
+      capabilities:
+        add: [ "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_PTRACE" ]
     resources:
       claims:
       - name: pod-net

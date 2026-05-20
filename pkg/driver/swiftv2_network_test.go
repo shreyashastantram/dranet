@@ -168,3 +168,40 @@ func TestCleanupIPVlanL3_NilConfig(t *testing.T) {
 	// Should not panic with nil config
 	cleanupIPVlanL3(nil)
 }
+
+func TestSwiftV2NSName(t *testing.T) {
+tests := []struct {
+name string
+mac  string
+want string
+}{
+{"colon-separated lowercase", "60:45:bd:70:e4:89", "swiftv2-6045bd70e489"},
+{"colon-separated uppercase", "60:45:BD:70:E4:89", "swiftv2-6045bd70e489"},
+{"hyphen-separated", "60-45-bd-70-e4-89", "swiftv2-6045bd70e489"},
+// invalid input is normalized best-effort (lowercased, separators stripped)
+{"invalid passthrough", "not-a-mac", "swiftv2-notamac"},
+}
+for _, tt := range tests {
+t.Run(tt.name, func(t *testing.T) {
+if got := swiftV2NSName(tt.mac); got != tt.want {
+t.Errorf("swiftV2NSName(%q) = %q, want %q", tt.mac, got, tt.want)
+}
+})
+}
+}
+
+func TestSwiftV2NSLock_SameMACReturnsSameMutex(t *testing.T) {
+// Different MAC string forms that normalize to the same key must yield the
+// same lock, otherwise concurrent attaches to the same parent NIC would race.
+a := swiftV2NSLock("60:45:bd:70:e4:89")
+b := swiftV2NSLock("60:45:BD:70:E4:89")
+c := swiftV2NSLock("60-45-bd-70-e4-89")
+if a != b || a != c {
+t.Errorf("expected same mutex for equivalent MACs, got %p / %p / %p", a, b, c)
+}
+// Different MACs must yield different locks.
+d := swiftV2NSLock("aa:bb:cc:dd:ee:ff")
+if a == d {
+t.Errorf("expected different mutex for different MAC")
+}
+}
