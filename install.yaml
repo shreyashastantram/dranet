@@ -231,8 +231,7 @@ spec:
       - requests: [ "nic" ]
         opaque:
           driver: networking.azure.com
-          parameters:
-            subnet: "pod-subnet"
+          parameters: {}
 ---
 apiVersion: resource.k8s.io/v1
 kind: ResourceClaimTemplate
