@@ -4,7 +4,7 @@ metadata:
   name: dedicateddebugpod1
   namespace: default
   labels:
-    kubernetes.azure.com/pod-network-instance: cust-pni2
+    kubernetes.azure.com/pod-network-instance: dedicatedcxsub1-pni
 spec:
   containers:
   - name: netshoot

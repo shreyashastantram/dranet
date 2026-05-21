@@ -1,0 +1,10 @@
+apiVersion: multitenancy.acn.azure.com/v1alpha1
+kind: PodNetwork
+metadata:
+    name: sharedcxsub2-pn
+spec:
+    networkID: 9b9d4ab4-4ed8-4bfa-99b4-ce9d29f730f0
+    deviceType: "acn.azure.com/vnet-nic"
+    subnetGUID: "19697a4b-7132-4d20-aa63-0dbf2f52c6d2"
+    subnetResourceID: /subscriptions/37deca37-c375-4a14-b90a-043849bd2bf1/resourceGroups/poddensityeuap/providers/Microsoft.Network/virtualNetworks/customervnet/subnets/sharedcxsub2
+    subnetAllocationMode: PrefixBlock

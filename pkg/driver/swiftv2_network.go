@@ -290,11 +290,22 @@ func nsAttachIPVlanL3(cfg *NICConfig, containerNsPath string) (*resourceapi.Netw
 	_, defaultDst, _ := net.ParseCIDR("0.0.0.0/0")
 	parentDefault := &netlink.Route{
 		Dst:       defaultDst,
-		Gw:        gwIP,
+		Gw:        gwIP.To4(),
 		LinkIndex: parent.Attrs().Index,
-		Flags:     int(netlink.FLAG_ONLINK),
 	}
 	if err := nhParent.RouteReplace(parentDefault); err != nil {
+		addrs, _ := nhParent.AddrList(parent, netlink.FAMILY_V4)
+		routes, _ := nhParent.RouteList(parent, netlink.FAMILY_V4)
+		klog.Errorf("SwiftV2: RouteReplace(default) FAILED in %s: err=%v "+
+			"route={Dst:%s Gw:%s GwLen:%d LinkIndex:%d Flags:%d Scope:%d Family:%d} "+
+			"parent={Name:%s Index:%d OperState:%s Flags:%s MTU:%d HW:%s} "+
+			"existing_addrs=%v existing_routes=%v",
+			nsName, err,
+			parentDefault.Dst, parentDefault.Gw, len(parentDefault.Gw),
+			parentDefault.LinkIndex, parentDefault.Flags, parentDefault.Scope, parentDefault.Family,
+			parent.Attrs().Name, parent.Attrs().Index, parent.Attrs().OperState,
+			parent.Attrs().Flags, parent.Attrs().MTU, parent.Attrs().HardwareAddr,
+			addrs, routes)
 		return nil, fmt.Errorf("failed to add default route in %s: %w", nsName, err)
 	}
 
