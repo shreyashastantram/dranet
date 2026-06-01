@@ -62,7 +62,32 @@ const (
 	// publisher to expose all delegated NIC devices for a node under a
 	// single, well-known pool.
 	delegatedNICsPoolName = "delegated-nics"
+
+	// cnsPrepareRetryInterval is how often prepareCNSResourceClaim re-calls
+	// CNS while waiting for the MultitenantPodNetworkConfig to become ready.
+	cnsPrepareRetryInterval = 500 * time.Millisecond
+
+	// cnsPrepareRetryTimeout is the maximum wall-clock time prepareCNSResourceClaim
+	// will spend retrying transient "MTPNC not ready" errors inside a single
+	// NodePrepareResources call. Kept well below kubelet's gRPC plugin timeout
+	// so we never get cancelled mid-retry. Tuned for the common case where
+	// MTPNC settles within ~1-3s after pod scheduling; if it takes longer we
+	// fall back to kubelet's pod sync retry (SyncFrequency, ~60-90s).
+	cnsPrepareRetryTimeout = 10 * time.Second
 )
+
+// isCNSNotReadyErr returns true when err indicates the per-pod CNS state
+// (MTPNC / pod IP config) has not yet been provisioned. This is the common
+// startup race where kubelet calls NodePrepareResources before CNS has
+// finished reconciling the MultitenantPodNetworkConfig CRD.
+func isCNSNotReadyErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "mtpnc is not ready") ||
+		strings.Contains(msg, "network is not ready")
+}
 
 // DRA hooks exposes Network Devices to Kubernetes, the Network devices and its attributes are
 // obtained via the netdb to decouple the discovery of the interfaces with the execution.
@@ -540,10 +565,43 @@ func (np *NetworkDriver) prepareCNSResourceClaim(ctx context.Context, claim *res
 			klog.Infof("prepareCNSResourceClaim: populating SwiftV2 store for pod %s/%s UID=%s device=%q MAC=%q hostPrimaryIP=%q shareID=%q",
 				pod.Namespace, pod.Name, pod.UID, deviceName, deviceMAC, nic.PrimaryIP, shareID)
 			claimKey := types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}
-			if err := np.populateSwiftV2StoreForDevice(ctx, pod, deviceName, deviceMAC, nic.PrimaryIP, claimKey, shareID, goalStateByPod); err != nil {
+
+			// Retry locally on transient "MTPNC not ready" errors so the pod can
+			// start immediately once CNS finishes reconciling, instead of waiting
+			// 60-90s for kubelet's next pod sync. Bounded by cnsPrepareRetryTimeout.
+			var lastErr error
+			deadline := time.Now().Add(cnsPrepareRetryTimeout)
+		retryLoop:
+			for attempt := 1; ; attempt++ {
+				lastErr = np.populateSwiftV2StoreForDevice(ctx, pod, deviceName, deviceMAC, nic.PrimaryIP, claimKey, shareID, goalStateByPod)
+				if lastErr == nil {
+					if attempt > 1 {
+						klog.Infof("prepareCNSResourceClaim: populateSwiftV2StoreForDevice succeeded on attempt %d for pod %s/%s device %q",
+							attempt, pod.Namespace, pod.Name, deviceName)
+					}
+					break
+				}
+				if !isCNSNotReadyErr(lastErr) {
+					break
+				}
+				if !time.Now().Before(deadline) {
+					klog.Warningf("prepareCNSResourceClaim: gave up after %d attempts (%v) waiting for CNS for pod %s/%s device %q: %v",
+						attempt, cnsPrepareRetryTimeout, pod.Namespace, pod.Name, deviceName, lastErr)
+					break
+				}
+				klog.V(2).Infof("prepareCNSResourceClaim: CNS not ready (attempt %d) for pod %s/%s device %q, retrying in %v: %v",
+					attempt, pod.Namespace, pod.Name, deviceName, cnsPrepareRetryInterval, lastErr)
+				select {
+				case <-ctx.Done():
+					lastErr = ctx.Err()
+					break retryLoop
+				case <-time.After(cnsPrepareRetryInterval):
+				}
+			}
+			if lastErr != nil {
 				klog.Errorf("prepareCNSResourceClaim: populateSwiftV2StoreForDevice failed for pod %s/%s device %q: %v",
-					pod.Namespace, pod.Name, deviceName, err)
-				errorList = append(errorList, err)
+					pod.Namespace, pod.Name, deviceName, lastErr)
+				errorList = append(errorList, lastErr)
 			}
 		}
 	}
