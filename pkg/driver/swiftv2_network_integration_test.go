@@ -260,11 +260,11 @@ func TestIntegration_findLinkByMAC(t *testing.T) {
 
 // TestIntegration_nsAttachIPVlanL3_FullCycle tests the complete shared NIC lifecycle:
 //  1. Create a parent dummy NIC in the host namespace.
-//  2. Call nsAttachIPVlanL3 to create an ipvlan L3 child, move it into the pod
-//     namespace, configure IP and routes.
+//  2. Call nsAttachIPVlanL3 to create a host VRF, enslave the parent, create an
+//     ipvlan L3 child, move it into the pod namespace, and configure IP/routes.
 //  3. Verify: eth1 exists in pod ns with correct IP/32, GW route, default route.
-//  4. Verify: host-side /32 route exists.
-//  5. Call cleanupIPVlanL3 and verify host route is removed.
+//  4. Verify: parent remains host-visible, enslaved to the per-MAC VRF, and the
+//     VRF table contains the Azure gateway/default routes and static neighbor.
 func TestIntegration_nsAttachIPVlanL3_FullCycle(t *testing.T) {
 	skipIfNotRoot(t)
 
@@ -289,8 +289,9 @@ func TestIntegration_nsAttachIPVlanL3_FullCycle(t *testing.T) {
 	ensureLinkMAC(t, "test-swift-prt", parentMAC)
 
 	// --- Attach: exercise the full nsAttachIPVlanL3 code path ---
-	// This creates an ipvlan L3 child off the parent, adds a host-side /32 route,
-	// moves the child into the pod ns, renames it to eth1, assigns IP + routes.
+	// This creates/enslaves the parent to a host VRF, creates an ipvlan L3 child
+	// off the parent, moves the child into the pod ns, renames it to eth1, and
+	// assigns IP + routes.
 	deviceData, err := nsAttachIPVlanL3(cfg, nsPath)
 	if err != nil {
 		t.Fatalf("nsAttachIPVlanL3 failed: %v", err)
@@ -382,48 +383,73 @@ func TestIntegration_nsAttachIPVlanL3_FullCycle(t *testing.T) {
 		t.Error("default route via gateway not found in container ns")
 	}
 
-	// --- Verify host-side /32 route ---
-	// The host needs a /32 route pointing to the pod IP via the parent NIC so that
-	// host-local processes (kubelet health probes, CNS) can reach the pod.
+	// --- Verify host parent-side VRF routing state ---
 	// Look up parent by name (not MAC) because creating an ipvlan child on some
 	// kernel versions may alter the parent's reported HardwareAddr.
 	parent, err := nlwrap.LinkByName("test-swift-prt")
 	if err != nil {
 		t.Fatalf("parent NIC not found after attach: %v", err)
 	}
-	hostRoutes, err := netlink.RouteList(parent, netlink.FAMILY_V4)
+	vrfName := swiftV2VRFName(parentMAC)
+	vrfLink, err := nlwrap.LinkByName(vrfName)
 	if err != nil {
-		t.Fatalf("failed to list host routes: %v", err)
+		t.Fatalf("SwiftV2 VRF %s not found after attach: %v", vrfName, err)
 	}
-	foundHostRoute := false
-	for _, r := range hostRoutes {
-		// Look for: 10.244.1.42/32 dev test-swift-prt scope link
-		if r.Dst != nil && r.Dst.IP.String() == "10.244.1.42" {
+	t.Cleanup(func() {
+		if vrf, err := nlwrap.LinkByName(vrfName); err == nil {
+			_ = netlink.LinkDel(vrf)
+		}
+	})
+	if vrfLink.Type() != "vrf" {
+		t.Fatalf("link %s is %q, want vrf", vrfName, vrfLink.Type())
+	}
+	if parent.Attrs().MasterIndex != vrfLink.Attrs().Index {
+		t.Fatalf("parent master index = %d, want VRF %s index %d", parent.Attrs().MasterIndex, vrfName, vrfLink.Attrs().Index)
+	}
+	parentTable, err := swiftV2VRFTable(parentMAC)
+	if err != nil {
+		t.Fatalf("failed to compute parent table: %v", err)
+	}
+	parentRoutes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{Table: parentTable}, netlink.RT_FILTER_TABLE)
+	if err != nil {
+		t.Fatalf("failed to list parent table %d routes: %v", parentTable, err)
+	}
+	foundGatewayRoute := false
+	foundParentDefaultRoute := false
+	for _, r := range parentRoutes {
+		if r.LinkIndex != parent.Attrs().Index {
+			continue
+		}
+		if r.Dst != nil && r.Dst.IP.String() == swiftV2VirtualGW {
 			ones, _ := r.Dst.Mask.Size()
-			if ones == 32 {
-				foundHostRoute = true
-			}
+			foundGatewayRoute = ones == 32 && r.Scope == netlink.SCOPE_LINK
+		}
+		if (r.Dst == nil || r.Dst.String() == "0.0.0.0/0") && r.Gw != nil && r.Gw.String() == swiftV2VirtualGW {
+			foundParentDefaultRoute = true
 		}
 	}
-	if !foundHostRoute {
-		t.Error("host-side /32 route for pod IP not found after nsAttachIPVlanL3")
+	if !foundGatewayRoute {
+		t.Errorf("gateway /32 route for %s not found in parent table %d", swiftV2VirtualGW, parentTable)
 	}
-
-	// --- Cleanup: remove host-side route (ipvlan child is auto-destroyed with ns) ---
-	cleanupIPVlanL3(cfg)
-
-	// Verify that the host-side /32 route was removed by cleanupIPVlanL3.
-	// If this route leaked, host routing tables would accumulate stale entries
-	// for every deleted pod.
-	hostRoutes, err = netlink.RouteList(parent, netlink.FAMILY_V4)
+	if !foundParentDefaultRoute {
+		t.Errorf("default route via %s not found in parent table %d", swiftV2VirtualGW, parentTable)
+	}
+	neighs, err := netlink.NeighList(parent.Attrs().Index, netlink.FAMILY_V4)
 	if err != nil {
-		t.Fatalf("failed to list host routes after cleanup: %v", err)
+		t.Fatalf("failed to list parent neighbors: %v", err)
 	}
-	for _, r := range hostRoutes {
-		if r.Dst != nil && r.Dst.IP.String() == "10.244.1.42" {
-			t.Error("host-side /32 route for pod IP still exists after cleanupIPVlanL3")
+	foundGatewayNeigh := false
+	for _, n := range neighs {
+		if n.IP.String() == swiftV2VirtualGW && n.HardwareAddr.String() == swiftV2SDNGatewayMAC && n.State == netlink.NUD_PERMANENT {
+			foundGatewayNeigh = true
+			break
 		}
 	}
+	if !foundGatewayNeigh {
+		t.Errorf("permanent gateway neighbor %s -> %s not found on parent", swiftV2VirtualGW, swiftV2SDNGatewayMAC)
+	}
+
+	cleanupIPVlanL3(cfg)
 }
 
 // TestIntegration_nsAttachIPVlanL3_IdempotentRetry tests the idempotent cleanup
@@ -735,6 +761,100 @@ func TestIntegration_nsAttachDedicatedNIC_FullCycle(t *testing.T) {
 	}
 }
 
+// TestIntegration_nsAttachDedicatedNIC_ReclaimsSharedVRF verifies that a NIC
+// previously used as a shared ipvlan parent can be reused by a dedicated pod.
+// Dedicated attach must detach the parent from its per-MAC SwiftV2 VRF, clean
+// the VRF route/neigh state, delete the VRF device, and then move the NIC into
+// the pod namespace.
+func TestIntegration_nsAttachDedicatedNIC_ReclaimsSharedVRF(t *testing.T) {
+	skipIfNotRoot(t)
+
+	_, nsPath := testNetns(t)
+	nicMAC := testDummyNIC(t, "test-ded-vrf")
+	ensureLinkMAC(t, "test-ded-vrf", nicMAC)
+
+	parent, err := nlwrap.LinkByName("test-ded-vrf")
+	if err != nil {
+		t.Fatalf("failed to find dummy parent: %v", err)
+	}
+	vrfName := swiftV2VRFName(nicMAC)
+	vrfTable, err := swiftV2VRFTable(nicMAC)
+	if err != nil {
+		t.Fatalf("failed to compute VRF table: %v", err)
+	}
+	vrf := &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: vrfName}, Table: uint32(vrfTable)}
+	if err := netlink.LinkAdd(vrf); err != nil {
+		t.Fatalf("failed to create VRF %s: %v", vrfName, err)
+	}
+	t.Cleanup(func() {
+		if staleVRF, err := nlwrap.LinkByName(vrfName); err == nil {
+			_ = netlink.LinkDel(staleVRF)
+		}
+	})
+	vrfLink, err := nlwrap.LinkByName(vrfName)
+	if err != nil {
+		t.Fatalf("VRF %s not found after creation: %v", vrfName, err)
+	}
+	if err := netlink.LinkSetUp(vrfLink); err != nil {
+		t.Fatalf("failed to bring VRF up: %v", err)
+	}
+	if err := netlink.LinkSetMaster(parent, vrfLink); err != nil {
+		t.Fatalf("failed to enslave parent to VRF: %v", err)
+	}
+	parent, err = nlwrap.LinkByName("test-ded-vrf")
+	if err != nil {
+		t.Fatalf("failed to refresh parent after VRF enslave: %v", err)
+	}
+	gwIP := net.ParseIP(swiftV2VirtualGW).To4()
+	if err := netlink.RouteReplace(&netlink.Route{
+		Dst:       &net.IPNet{IP: gwIP, Mask: net.CIDRMask(32, 32)},
+		LinkIndex: parent.Attrs().Index,
+		Scope:     netlink.SCOPE_LINK,
+		Table:     vrfTable,
+	}); err != nil {
+		t.Fatalf("failed to add VRF gateway route: %v", err)
+	}
+	_, defaultDst, _ := net.ParseCIDR("0.0.0.0/0")
+	if err := netlink.RouteReplace(&netlink.Route{
+		Dst:       defaultDst,
+		Gw:        gwIP,
+		LinkIndex: parent.Attrs().Index,
+		Table:     vrfTable,
+		Flags:     int(netlink.FLAG_ONLINK),
+	}); err != nil {
+		t.Fatalf("failed to add VRF default route: %v", err)
+	}
+	sdnGWMAC, _ := net.ParseMAC(swiftV2SDNGatewayMAC)
+	if err := netlink.NeighSet(&netlink.Neigh{
+		LinkIndex:    parent.Attrs().Index,
+		IP:           gwIP,
+		HardwareAddr: sdnGWMAC,
+		State:        netlink.NUD_PERMANENT,
+	}); err != nil {
+		t.Fatalf("failed to add VRF gateway neighbor: %v", err)
+	}
+
+	cfg := &NICConfig{
+		MAC:       nicMAC,
+		GatewayIP: swiftV2VirtualGW,
+		Addresses: []string{"10.244.8.50/24"},
+	}
+	if _, err := nsAttachDedicatedNIC(cfg, nsPath); err != nil {
+		t.Fatalf("nsAttachDedicatedNIC failed while reclaiming VRF parent: %v", err)
+	}
+	if _, err := nlwrap.LinkByName(vrfName); err == nil {
+		t.Fatalf("VRF %s still exists after dedicated reclaim", vrfName)
+	}
+	if !nicExistsInNetns(nsPath, nicMAC) {
+		t.Fatal("dedicated NIC not found in pod namespace after reclaim")
+	}
+
+	cleanupDedicatedNIC(nsPath, nicMAC)
+	if _, err := findLinkByMAC(nicMAC); err != nil {
+		t.Fatalf("dedicated NIC not returned to host after cleanup: %v", err)
+	}
+}
+
 // TestIntegration_nsAttachDedicatedNIC_MultipleAddresses verifies that multiple
 // IP addresses can be assigned to a dedicated NIC. This scenario occurs when CNS
 // assigns multiple IPs to the same NIC (e.g., dual-stack or multi-IP pods).
@@ -933,107 +1053,4 @@ func TestIntegration_cleanupIPVlanL3_NonexistentParent(t *testing.T) {
 	// cleanupIPVlanL3 should handle the missing parent gracefully — it logs
 	// a klog.Warning and returns without attempting to delete a route.
 	cleanupIPVlanL3(cfg)
-}
-
-// TestIntegration_DedicatedNIC_AlreadyInNetns verifies the TOCTOU race handling:
-// During the migration period, both CNI and NRI may try to plumb the same dedicated
-// NIC. If CNI moves the NIC into the pod namespace between NRI's nicExistsInNetns
-// check and its findLinkByMAC call, nsAttachDedicatedNIC should detect this and
-// return success (with the NIC's MAC) instead of failing with "not found".
-func TestIntegration_DedicatedNIC_AlreadyInNetns(t *testing.T) {
-	skipIfNotRoot(t)
-
-	testNS, nsPath := testNetns(t)
-
-	// Create a dummy NIC on the host and bring it UP.
-	name := "test-swift-cni"
-	mac := testDummyNIC(t, name)
-	actual, err := nlwrap.LinkByName(name)
-	if err != nil {
-		t.Fatalf("failed to find dummy: %v", err)
-	}
-
-	// Simulate CNI having already moved the NIC into the pod namespace.
-	// Use GetFromPath (matching the production code pattern) to get the ns handle.
-	preNs, err := netns.GetFromPath(nsPath)
-	if err != nil {
-		t.Fatalf("failed to open namespace from path: %v", err)
-	}
-	defer preNs.Close()
-
-	// Move the NIC into the pod ns — this is what CNI does before NRI runs.
-	if err := netlink.LinkSetNsFd(actual, int(preNs)); err != nil {
-		t.Fatalf("failed to pre-move NIC to pod ns: %v", err)
-	}
-
-	// Dummy NIC quirk: moving across namespaces may regenerate MAC. Restore
-	// expected MAC inside pod ns so TOCTOU check sees the intended identity.
-	nhFix, err := nlwrap.NewHandleAt(testNS)
-	if err != nil {
-		t.Fatalf("failed to get handle in test netns: %v", err)
-	}
-	nsMoved, err := nhFix.LinkByName(name)
-	if err != nil {
-		nhFix.Close()
-		t.Fatalf("NIC not found in test ns after pre-move: %v", err)
-	}
-	targetMAC, err := net.ParseMAC(mac)
-	if err != nil {
-		nhFix.Close()
-		t.Fatalf("invalid MAC %s: %v", mac, err)
-	}
-	if err := nhFix.LinkSetHardwareAddr(nsMoved, targetMAC); err != nil {
-		nhFix.Close()
-		t.Fatalf("failed to restore MAC in test ns: %v", err)
-	}
-	nhFix.Close()
-
-	cfg := &NICConfig{
-		MAC:       mac,
-		GatewayIP: swiftV2VirtualGW,
-	}
-
-	// Now call nsAttachDedicatedNIC — it will fail to find the NIC on the host
-	// (findLinkByMAC returns an error), then fall through to the TOCTOU check
-	// which calls nicExistsInNetns and discovers the NIC is already in the pod ns.
-	// It should return success with the NIC's MAC address.
-	deviceData, err := nsAttachDedicatedNIC(cfg, nsPath)
-	if err != nil {
-		t.Fatalf("nsAttachDedicatedNIC should have handled NIC already in pod ns: %v", err)
-	}
-	// The returned data should include the MAC so DRA can still publish it.
-	if deviceData.HardwareAddress != mac {
-		t.Errorf("HardwareAddress = %s, want %s", deviceData.HardwareAddress, mac)
-	}
-
-	// --- Manual cleanup: move NIC back to host namespace ---
-	// Open a netlink handle into the pod ns to find and move the NIC back.
-	nhNs, err := nlwrap.NewHandleAt(testNS)
-	if err != nil {
-		t.Fatalf("failed to get handle: %v", err)
-	}
-	defer nhNs.Close()
-
-	// Look up the NIC by its original name inside the pod namespace.
-	nsLink, err := nhNs.LinkByName(name)
-	if err != nil {
-		t.Fatalf("NIC not found in test ns: %v", err)
-	}
-
-	// Get a handle to the host namespace for the move target.
-	rootNs, err := netns.Get()
-	if err != nil {
-		t.Fatalf("failed to get root ns: %v", err)
-	}
-	defer rootNs.Close()
-
-	// Move NIC back to host so the cleanup function can delete it.
-	_ = nhNs.LinkSetNsFd(nsLink, int(rootNs))
-
-	// Register cleanup to delete the dummy NIC.
-	t.Cleanup(func() {
-		if l, err := nlwrap.LinkByName(name); err == nil {
-			_ = netlink.LinkDel(l)
-		}
-	})
 }

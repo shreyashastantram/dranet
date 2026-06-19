@@ -30,22 +30,21 @@ import (
 	"k8s.io/klog/v2"
 )
 
-var (
-	nsAttachSwiftV2NICHook = nsAttachSwiftV2NIC
-	nicExistsInNetnsHook   = nicExistsInNetns
-)
+var nsAttachSwiftV2NICHook = nsAttachSwiftV2NIC
 
 // runPodSandboxSwiftV2 processes SwiftV2-managed devices for a pod during
-// the NRI RunPodSandbox hook. It handles both shared NIC (ipvlan L3S) and
+// the NRI RunPodSandbox hook. It handles both shared NIC (ipvlan L3) and
 // dedicated NIC (physical NIC move) configurations.
 //
-// For shared NIC: creates an ipvlan L3S sub-interface, adds host /32 route,
-// moves interface into pod namespace, configures IP and routes.
+// For shared NIC: ensures the parent NIC is enslaved to a per-MAC host VRF,
+// creates an ipvlan L3 child, moves it into the pod namespace, and configures
+// pod IP/routes/neighbors.
 //
-// For dedicated NIC: checks if the NIC already exists in the pod namespace
-// (CNI may have already plumbed it). If not, moves the NIC into the pod
-// namespace, brings it up, assigns IP addresses, and configures routes.
-// Issues a background DHCP discover for wireserver DNS mapping.
+// For dedicated NIC: moves the NIC into the pod namespace, brings it up,
+// assigns IP addresses, and configures routes. If the NIC is currently a
+// shared parent (enslaved to a host VRF), it is first detached from the VRF
+// and the shared routing state is torn down. Issues a background DHCP discover
+// for wireserver DNS mapping.
 //
 // After successful attachment, it patches the corresponding ResourceClaim's
 // status.devices[*] with the runtime-observed network data (interface name,
@@ -70,12 +69,12 @@ func (np *NetworkDriver) runPodSandboxSwiftV2(ctx context.Context, pod *api.PodS
 				klog.Warningf("SwiftV2 RunPodSandbox: device %s has shared mode but empty MAC, skipping", deviceName)
 				continue
 			}
-			klog.V(2).Infof("SwiftV2 RunPodSandbox: attaching shared ipvlan L3S for device %s (MAC %s, pod IP %s) on pod %s/%s",
+			klog.V(2).Infof("SwiftV2 RunPodSandbox: attaching shared ipvlan L3 via host VRF for device %s (MAC %s, pod IP %s) on pod %s/%s",
 				deviceName, cfg.NIC.MAC, cfg.NIC.PodIP, pod.Namespace, pod.Name)
 
 			networkData, err := nsAttachSwiftV2NICHook(cfg.Mode, &cfg.NIC, ns)
 			if err != nil {
-				return fmt.Errorf("SwiftV2 RunPodSandbox: failed to attach ipvlan L3S for device %s: %w", deviceName, err)
+				return fmt.Errorf("SwiftV2 RunPodSandbox: failed to attach shared ipvlan L3 for device %s: %w", deviceName, err)
 			}
 			klog.V(2).Infof("SwiftV2 RunPodSandbox: attached shared NIC %s as %s with IPs %v on pod %s/%s",
 				deviceName, networkData.InterfaceName, networkData.IPs, pod.Namespace, pod.Name)
@@ -88,16 +87,10 @@ func (np *NetworkDriver) runPodSandboxSwiftV2(ctx context.Context, pod *api.PodS
 				continue
 			}
 
-			// Idempotent gate for dedicated NIC migration:
-			// - If NIC is already in the pod namespace, do nothing.
-			// - If NIC is not in the pod namespace, proceed to move and configure it.
-			// This ensures NRI never re-plumbs a NIC that has already been moved.
-			if nicExistsInNetnsHook(ns, cfg.NIC.MAC) {
-				klog.V(2).Infof("SwiftV2 RunPodSandbox: dedicated NIC %s (MAC %s) already in pod netns, skipping (CNI plumbed)",
-					deviceName, cfg.NIC.MAC)
-				continue
-			}
-
+			// NRI owns the dedicated NIC move: always plumb. nsAttachDedicatedNIC
+			// detaches the NIC from any shared-parent VRF and tears down the shared
+			// routing state before moving it into the pod, so a NIC previously used
+			// by shared pods can be reclaimed for dedicated use.
 			klog.V(2).Infof("SwiftV2 RunPodSandbox: attaching dedicated NIC %s (MAC %s) to pod %s/%s",
 				deviceName, cfg.NIC.MAC, pod.Namespace, pod.Name)
 
@@ -206,8 +199,9 @@ func (np *NetworkDriver) applySwiftV2ClaimStatusUpdates(
 // the NRI StopPodSandbox hook. This is best-effort — errors are logged but
 // not returned to avoid disrupting pod shutdown.
 //
-// For shared NIC: removes the host-side /32 route. The ipvlan sub-interface
-// is automatically destroyed with the pod's network namespace.
+// For shared NIC: per-pod cleanup is best-effort; the ipvlan sub-interface is
+// automatically destroyed with the pod's network namespace, while parent VRF
+// state remains shared by later pods on the same NIC.
 //
 // For dedicated NIC: moves the physical NIC back to the host namespace.
 // If the namespace is already gone, the kernel has returned the NIC automatically.

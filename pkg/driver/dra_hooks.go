@@ -133,6 +133,14 @@ func (np *NetworkDriver) PublishCNSResources(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
+	// The ticker's first tick is at t=5s. Run one pass eagerly so the SwiftV2
+	// masquerade-exemption reconcile (and the ResourceSlice publish) happen at
+	// startup rather than 5s later, restoring exemptions for already-running
+	// shared pods promptly after a dranet restart or node reboot.
+	if err := np.publishCNSResources(ctx); err != nil {
+		klog.Errorf("failed to publish CNS resources (initial): %v", err)
+	}
+
 	for {
 		select {
 		case <-ticker.C:
@@ -162,6 +170,13 @@ func (np *NetworkDriver) publishCNSResources(ctx context.Context) error {
 
 	logCNSNICChanges(prev, nicResources)
 
+	// Reconcile the SwiftV2 host masquerade exemptions for shared delegated NICs.
+	// This is the durability backstop for the per-attach ensure: it re-asserts the
+	// rule for shared NICs whose pods are already running (NRI does not replay
+	// attach across a dranet restart) and after an external nat flush or node
+	// reboot. Ensure-only and check-first, so steady state is read-only.
+	reconcileSwiftV2NATExemptions(nicResources)
+
 	pools := make(map[string]resourceslice.Pool, 1)
 	allDevices := make([]resourceapi.Device, 0, len(nicResources))
 	for i := range nicResources {
@@ -177,6 +192,31 @@ func (np *NetworkDriver) publishCNSResources(ctx context.Context) error {
 	}
 
 	return np.publishCNSPools(ctx, pools)
+}
+
+// reconcileSwiftV2NATExemptions ensures the host masquerade-exemption rule is
+// present for every shared delegated NIC currently reported by CNS.
+//
+// A NIC is shared-and-host-visible when CNS reports Capacity > 1 (the MAC has a
+// NICNetworkConfig CRD) and a non-empty InterfaceName (the NIC is in the host
+// namespace, not already moved into a pod netns). Dedicated NICs (Capacity == 1)
+// and NICs already inside a pod netns (empty InterfaceName) are skipped: they
+// have no host-namespace egress to protect.
+//
+// The pass is ensure-only and check-first (see ensureSwiftV2NATExemption), so it
+// is cheap to run on every CNS poll and never prunes; a stale exemption left
+// after a NIC leaves shared mode is inert.
+func reconcileSwiftV2NATExemptions(nics []cnsclient.NICResource) {
+	for i := range nics {
+		nic := &nics[i]
+		if nic.Capacity <= 1 || nic.InterfaceName == "" {
+			continue
+		}
+		if err := ensureSwiftV2NATExemption(nic.InterfaceName); err != nil {
+			klog.Errorf("SwiftV2: failed to reconcile NAT exemption for shared NIC %s (MAC %s): %v",
+				nic.InterfaceName, nic.MacAddress, err)
+		}
+	}
 }
 
 // logCNSNICChanges compares the previous and current NIC resource lists from

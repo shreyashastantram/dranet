@@ -2,7 +2,6 @@ package driver
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
 	nriapi "github.com/containerd/nri/pkg/api"
@@ -59,13 +58,10 @@ func TestRunPodSandboxSwiftV2_SharedHappyPath(t *testing.T) {
 
 func TestRunPodSandboxSwiftV2_DedicatedHappyPath(t *testing.T) {
 	oldAttach := nsAttachSwiftV2NICHook
-	oldExists := nicExistsInNetnsHook
 	defer func() {
 		nsAttachSwiftV2NICHook = oldAttach
-		nicExistsInNetnsHook = oldExists
 	}()
 
-	nicExistsInNetnsHook = func(string, string) bool { return false }
 	called := 0
 	nsAttachSwiftV2NICHook = func(mode NICMode, cfg *NICConfig, containerNsPath string) (*resourceapi.NetworkDeviceData, error) {
 		called++
@@ -98,33 +94,5 @@ func TestRunPodSandboxSwiftV2_DedicatedHappyPath(t *testing.T) {
 	}
 	if called != 1 {
 		t.Fatalf("dedicated attach called %d times, want 1", called)
-	}
-}
-
-func TestRunPodSandboxSwiftV2_DedicatedAlreadyMovedSkipsAttach(t *testing.T) {
-	oldAttach := nsAttachSwiftV2NICHook
-	oldExists := nicExistsInNetnsHook
-	defer func() {
-		nsAttachSwiftV2NICHook = oldAttach
-		nicExistsInNetnsHook = oldExists
-	}()
-
-	nicExistsInNetnsHook = func(containerNsPath string, mac string) bool {
-		return containerNsPath == "/run/netns/pod-c" && mac == "aa:bb:cc:dd:ee:03"
-	}
-	nsAttachSwiftV2NICHook = func(mode NICMode, cfg *NICConfig, containerNsPath string) (*resourceapi.NetworkDeviceData, error) {
-		return nil, fmt.Errorf("should not be called")
-	}
-
-	np := &NetworkDriver{}
-	cfgs := map[string]SwiftV2PodConfig{
-		"eth2": {
-			Mode: NICModeDedicated,
-			NIC:  NICConfig{MAC: "aa:bb:cc:dd:ee:03", GatewayIP: swiftV2VirtualGW, Addresses: []string{"10.3.0.10/24"}},
-		},
-	}
-
-	if err := np.runPodSandboxSwiftV2(context.Background(), testSwiftV2Pod("/run/netns/pod-c"), cfgs); err != nil {
-		t.Fatalf("runPodSandboxSwiftV2 failed: %v", err)
 	}
 }
