@@ -43,9 +43,6 @@ func TestBuildSwiftV2PodConfigShared(t *testing.T) {
 	if cfg.NIC.PodIP != "10.0.0.10" {
 		t.Fatalf("unexpected pod IP %s", cfg.NIC.PodIP)
 	}
-	if cfg.NIC.SubnetPrefix != 24 {
-		t.Fatalf("unexpected prefix %d", cfg.NIC.SubnetPrefix)
-	}
 	if len(cfg.InterfaceConfig.Interface.Addresses) != 1 || cfg.InterfaceConfig.Interface.Addresses[0] != "10.0.0.10/32" {
 		t.Fatalf("unexpected shared addresses %v", cfg.InterfaceConfig.Interface.Addresses)
 	}

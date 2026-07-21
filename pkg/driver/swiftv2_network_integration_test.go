@@ -274,14 +274,13 @@ func TestIntegration_nsAttachIPVlanL3_FullCycle(t *testing.T) {
 	parentMAC := testDummyNIC(t, "test-swift-prt")
 
 	// Build a NICConfig that mirrors what CNS would provide for a shared NIC pod.
-	// MAC identifies the parent NIC; PodIP/GatewayIP/SubnetPrefix configure the
+	// MAC identifies the parent NIC; PodIP/GatewayIP configure the
 	// ipvlan child; PodUID is used for the temporary ipvlan interface name.
 	cfg := &NICConfig{
-		MAC:          parentMAC,
-		PodIP:        "10.244.1.42",
-		GatewayIP:    swiftV2VirtualGW,
-		SubnetPrefix: 24,
-		PodUID:       "abcdef12-3456-7890-abcd-ef1234567890",
+		MAC:       parentMAC,
+		PodIP:     "10.244.1.42",
+		GatewayIP: swiftV2VirtualGW,
+		PodUID:    "abcdef12-3456-7890-abcd-ef1234567890",
 	}
 
 	// Dummy NIC quirk: MAC can occasionally regenerate; force it back to the
@@ -483,11 +482,10 @@ func TestIntegration_nsAttachIPVlanL3_IdempotentRetry(t *testing.T) {
 		parentMAC := testDummyNIC(t, "test-idem-prt1")
 
 		cfg := &NICConfig{
-			MAC:          parentMAC,
-			PodIP:        "10.244.9.10",
-			GatewayIP:    swiftV2VirtualGW,
-			SubnetPrefix: 24,
-			PodUID:       podUID,
+			MAC:       parentMAC,
+			PodIP:     "10.244.9.10",
+			GatewayIP: swiftV2VirtualGW,
+			PodUID:    podUID,
 		}
 
 		// Dummy NIC quirk: parent MAC can occasionally change; reset to expected
@@ -546,11 +544,10 @@ func TestIntegration_nsAttachIPVlanL3_IdempotentRetry(t *testing.T) {
 		parentMAC := testDummyNIC(t, "test-idem-prt2")
 
 		cfg := &NICConfig{
-			MAC:          parentMAC,
-			PodIP:        "10.244.9.11",
-			GatewayIP:    swiftV2VirtualGW,
-			SubnetPrefix: 24,
-			PodUID:       podUID,
+			MAC:       parentMAC,
+			PodIP:     "10.244.9.11",
+			GatewayIP: swiftV2VirtualGW,
+			PodUID:    podUID,
 		}
 
 		// Simulate a failed first attempt: create ipvlan child on host, then
@@ -615,11 +612,10 @@ func TestIntegration_nsAttachIPVlanL3_IdempotentRetry(t *testing.T) {
 		parentMAC := testDummyNIC(t, "test-idem-prt3")
 
 		cfg := &NICConfig{
-			MAC:          parentMAC,
-			PodIP:        "10.244.9.12",
-			GatewayIP:    swiftV2VirtualGW,
-			SubnetPrefix: 24,
-			PodUID:       podUID,
+			MAC:       parentMAC,
+			PodIP:     "10.244.9.12",
+			GatewayIP: swiftV2VirtualGW,
+			PodUID:    podUID,
 		}
 
 		// Simulate a failed first attempt: create ipvlan child, move it into

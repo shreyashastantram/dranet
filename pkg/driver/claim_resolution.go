@@ -196,7 +196,6 @@ func buildSwiftV2PodConfig(podUID types.UID, info cnsclient.PodIPInfo) (SwiftV2P
 	if info.SharedNIC {
 		cfg.Mode = NICModeShared
 		cfg.NIC.PodIP = info.PodIPConfig.IPAddress
-		cfg.NIC.SubnetPrefix = prefixLength
 		cfg.NIC.PodUID = string(podUID)
 		cfg.InterfaceConfig.Interface.Addresses = []string{fmt.Sprintf("%s/32", info.PodIPConfig.IPAddress)}
 		return cfg, nil

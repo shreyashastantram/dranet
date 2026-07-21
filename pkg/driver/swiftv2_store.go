@@ -37,7 +37,7 @@ const (
 // NICConfig holds the configuration needed to plumb a NIC into a pod's
 // network namespace. The NICMode field on SwiftV2PodConfig determines which
 // fields are relevant:
-//   - Shared mode uses MAC (to find the parent), PodIP, GatewayIP, SubnetPrefix, PodUID
+//   - Shared mode uses MAC (to find the parent), PodIP, GatewayIP, PodUID
 //   - Dedicated mode uses MAC (to find the NIC), GatewayIP, and Addresses
 type NICConfig struct {
 	// MAC is the NIC's MAC address. For shared mode, this identifies the parent
@@ -52,8 +52,6 @@ type NICConfig struct {
 	Addresses []string
 	// PodIP is the IP address assigned to this pod (shared mode only, e.g., "10.0.1.10").
 	PodIP string
-	// SubnetPrefix is the subnet prefix length (shared mode only, e.g., 24).
-	SubnetPrefix int
 	// PodUID is used for naming the ipvlan child interface (shared mode only, first 8 chars).
 	PodUID string
 }
