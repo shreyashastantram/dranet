@@ -81,13 +81,13 @@ func (np *NetworkDriver) getPodGoalState(ctx context.Context, pod podConsumer, c
 	return infos, nil
 }
 
-func (np *NetworkDriver) populateSwiftV2StoreForDevice(ctx context.Context, pod podConsumer, deviceName, deviceMAC, hostPrimaryIP string, claimKey types.NamespacedName, shareID string, cache map[types.UID][]cnsclient.PodIPInfo) error {
+func (np *NetworkDriver) populateSwiftV2StoreForDevice(ctx context.Context, pod podConsumer, deviceName, deviceMAC string, claimKey types.NamespacedName, shareID string, cache map[types.UID][]cnsclient.PodIPInfo) error {
 	if np.cnsClient == nil {
 		klog.Infof("populateSwiftV2StoreForDevice: cnsClient is nil, skipping for pod %s/%s device %s", pod.Namespace, pod.Name, deviceName)
 		return nil
 	}
 
-	klog.Infof("populateSwiftV2StoreForDevice: fetching goal state for pod %s/%s device=%q MAC=%q hostPrimaryIP=%q", pod.Namespace, pod.Name, deviceName, deviceMAC, hostPrimaryIP)
+	klog.Infof("populateSwiftV2StoreForDevice: fetching goal state for pod %s/%s device=%q MAC=%q", pod.Namespace, pod.Name, deviceName, deviceMAC)
 	infos, err := np.getPodGoalState(ctx, pod, cache)
 	if err != nil {
 		return err
@@ -115,7 +115,7 @@ func (np *NetworkDriver) populateSwiftV2StoreForDevice(ctx context.Context, pod 
 			pod.Namespace, pod.Name, deviceName, err)
 	}
 
-	cfg, err := buildSwiftV2PodConfig(pod.UID, info, hostPrimaryIP)
+	cfg, err := buildSwiftV2PodConfig(pod.UID, info)
 	if err != nil {
 		return fmt.Errorf("failed to build SwiftV2 config for pod %s/%s device %s: %w", pod.Namespace, pod.Name, deviceName, err)
 	}
@@ -158,7 +158,7 @@ func normalizeMAC(mac string) (string, bool) {
 	return strings.ToLower(parsed.String()), true
 }
 
-func buildSwiftV2PodConfig(podUID types.UID, info cnsclient.PodIPInfo, hostPrimaryIP string) (SwiftV2PodConfig, error) {
+func buildSwiftV2PodConfig(podUID types.UID, info cnsclient.PodIPInfo) (SwiftV2PodConfig, error) {
 	if info.MacAddress == "" {
 		return SwiftV2PodConfig{}, fmt.Errorf("missing MAC address")
 	}
@@ -198,23 +198,6 @@ func buildSwiftV2PodConfig(podUID types.UID, info cnsclient.PodIPInfo, hostPrima
 		cfg.NIC.PodIP = info.PodIPConfig.IPAddress
 		cfg.NIC.SubnetPrefix = prefixLength
 		cfg.NIC.PodUID = string(podUID)
-		// hostPrimaryIP arrives from CNS GetNICResources as a CIDR using the
-		// *subnet* address-space prefix (e.g., "165.0.0.16/20"). Split into:
-		//   - cfg.NIC.HostPrimaryIP: the bare IP (e.g., "165.0.0.16")
-		//   - cfg.NIC.SubnetPrefix:  the subnet width (e.g., 20) — overrides
-		//     the NC prefix-on-NIC width from PodIPConfig (e.g., 28).
-		// The subnet width is what we want to assign to the parent NIC on
-		// the host so the auto-generated connected route covers every pod
-		// IP in the customer subnet (including pods on other NICs in the
-		// same subnet), not just this NIC's narrow NC prefix.
-		if hostPrimaryIP != "" {
-			if ip, prefix, ok := splitHostPrimaryIPCIDR(hostPrimaryIP); ok {
-				cfg.NIC.HostPrimaryIP = ip
-				cfg.NIC.SubnetPrefix = prefix
-			} else {
-				cfg.NIC.HostPrimaryIP = hostPrimaryIP
-			}
-		}
 		cfg.InterfaceConfig.Interface.Addresses = []string{fmt.Sprintf("%s/32", info.PodIPConfig.IPAddress)}
 		return cfg, nil
 	}
@@ -222,27 +205,6 @@ func buildSwiftV2PodConfig(podUID types.UID, info cnsclient.PodIPInfo, hostPrima
 	cfg.Mode = NICModeDedicated
 	cfg.NIC.Addresses = []string{addressCIDR}
 	return cfg, nil
-}
-
-// splitHostPrimaryIPCIDR parses a CIDR string like "165.0.0.16/20" into the
-// bare IP ("165.0.0.16") and the prefix length (20). Returns ok=false when
-// the input doesn't carry a prefix or the prefix isn't a positive integer.
-func splitHostPrimaryIPCIDR(cidr string) (ip string, prefix int, ok bool) {
-	idx := strings.IndexByte(cidr, '/')
-	if idx <= 0 || idx+1 >= len(cidr) {
-		return "", 0, false
-	}
-	ip = cidr[:idx]
-	for _, c := range cidr[idx+1:] {
-		if c < '0' || c > '9' {
-			return "", 0, false
-		}
-		prefix = prefix*10 + int(c-'0')
-	}
-	if prefix <= 0 || prefix > 32 {
-		return "", 0, false
-	}
-	return ip, prefix, true
 }
 
 // validatePodIPInfo checks that a CNS PodIPInfo has the required fields
