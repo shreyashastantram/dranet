@@ -667,7 +667,7 @@ func nsAttachSwiftV2NIC(mode NICMode, cfg *NICConfig, containerNsPath string) (*
 //   - Assign IP addresses
 //   - Add routes: virtual GW /32 scope link + default via virtual GW
 //   - Issue DHCP discover for DNS wireserver mapping (synchronous; failure is fatal)
-func nsAttachDedicatedNIC(cfg *NICConfig, containerNsPath string) (*resourceapi.NetworkDeviceData, error) {
+func nsAttachDedicatedNIC(cfg *NICConfig, containerNsPath string) (networkData *resourceapi.NetworkDeviceData, retErr error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("NICConfig is nil")
 	}
@@ -702,6 +702,20 @@ func nsAttachDedicatedNIC(cfg *NICConfig, containerNsPath string) (*resourceapi.
 		return nil, fmt.Errorf("failed to move NIC %s to netns %s: %w", ifName, containerNsPath, err)
 	}
 
+	// The NIC has now left the host and lives in the pod netns. Mirror the CNI
+	// SecondaryEndpointClient contract (newEndpointImpl defers cleanup that calls
+	// DeleteEndpoints, returning a FrontendNIC to the host): if any step below
+	// fails — including the fatal DHCP discover — roll the move back by returning
+	// the NIC to the host, so a retry finds it via findLinkByMAC instead of
+	// stranding it in a failed pod netns. cleanupDedicatedNIC is a no-op if the
+	// NIC is already gone.
+	defer func() {
+		if retErr != nil {
+			klog.V(2).Infof("SwiftV2 dedicated NIC: attach failed after move, returning NIC (MAC %s) to host: %v", cfg.MAC, retErr)
+			cleanupDedicatedNIC(containerNsPath, cfg.MAC)
+		}
+	}()
+
 	// --- Pod namespace operations ---
 
 	nhNs, err := nlwrap.NewHandleAt(containerNs)
@@ -721,7 +735,7 @@ func nsAttachDedicatedNIC(cfg *NICConfig, containerNsPath string) (*resourceapi.
 	}
 
 	// Assign IP addresses.
-	networkData := &resourceapi.NetworkDeviceData{
+	networkData = &resourceapi.NetworkDeviceData{
 		InterfaceName:   ifName,
 		HardwareAddress: targetMAC.String(),
 	}
