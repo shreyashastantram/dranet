@@ -757,6 +757,47 @@ func TestIntegration_nsAttachDedicatedNIC_FullCycle(t *testing.T) {
 	}
 }
 
+// TestIntegration_nsAttachDedicatedNIC_RollbackOnFailure verifies the CNI-style
+// transactional rollback: when nsAttachDedicatedNIC fails AFTER moving the NIC
+// into the pod netns, it returns the NIC to the host so a subsequent attempt can
+// find it via findLinkByMAC instead of leaving it stranded. The failure is
+// forced with an invalid GatewayIP, whose parse check runs after the move and
+// needs no DHCP server.
+func TestIntegration_nsAttachDedicatedNIC_RollbackOnFailure(t *testing.T) {
+	skipIfNotRoot(t)
+
+	_, nsPath := testNetns(t)
+	nicMAC := testDummyNIC(t, "test-swift-rb")
+
+	cfg := &NICConfig{
+		MAC:       nicMAC,
+		GatewayIP: "not-an-ip", // invalid: forces failure AFTER the NIC has moved into the pod ns
+		Addresses: []string{"10.244.3.60/24"},
+	}
+
+	ensureLinkMAC(t, "test-swift-rb", nicMAC)
+
+	// The attach must fail (invalid gateway), and it fails after LinkSetNsFd has
+	// already moved the NIC into the pod namespace.
+	if _, err := nsAttachDedicatedNIC(cfg, nsPath); err == nil {
+		t.Fatal("expected nsAttachDedicatedNIC to fail with an invalid gateway IP, got nil")
+	}
+
+	// Rollback assertion: the NIC must have been returned to the host namespace.
+	link, err := findLinkByMAC(nicMAC)
+	if err != nil {
+		t.Fatalf("dedicated NIC was not returned to host after failed attach (rollback missing): %v", err)
+	}
+	if link.Attrs().HardwareAddr.String() != nicMAC {
+		t.Errorf("returned NIC MAC = %s, want %s", link.Attrs().HardwareAddr.String(), nicMAC)
+	}
+
+	// And it must no longer be inside the pod namespace.
+	if nicExistsInNetns(nsPath, nicMAC) {
+		t.Error("dedicated NIC still in pod netns after failed attach (rollback did not move it back)")
+	}
+}
+
 // TestIntegration_nsAttachDedicatedNIC_ReclaimsSharedVRF verifies that a NIC
 // previously used as a shared ipvlan parent can be reused by a dedicated pod.
 // Dedicated attach must detach the parent from its per-MAC SwiftV2 VRF, clean
