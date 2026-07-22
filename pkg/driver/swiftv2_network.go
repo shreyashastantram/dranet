@@ -754,6 +754,13 @@ func nsAttachDedicatedNIC(cfg *NICConfig, containerNsPath string) (networkData *
 		networkData.IPs = append(networkData.IPs, addr)
 	}
 
+	// A dedicated NIC with no usable address cannot carry pod traffic. Fail the
+	// attach (the deferred rollback above returns the NIC to the host) rather
+	// than leaving the pod with a dead delegated interface.
+	if len(networkData.IPs) == 0 {
+		return nil, fmt.Errorf("dedicated NIC %s (MAC %s): no valid address assigned from %v", ifName, cfg.MAC, cfg.Addresses)
+	}
+
 	// Delete kernel-added subnet routes (matches CNI ConfigureContainerInterfacesAndRoutes).
 	// When assigning an IP, the kernel auto-adds a subnet route that we need to remove.
 	for _, addr := range cfg.Addresses {
