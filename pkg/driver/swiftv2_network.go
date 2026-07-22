@@ -658,40 +658,6 @@ func nsAttachSwiftV2NIC(mode NICMode, cfg *NICConfig, containerNsPath string) (*
 	}
 }
 
-// nicExistsInNetns checks whether a NIC with the given MAC address already
-// exists in the specified network namespace. Used for idempotent dedicated NIC
-// plumbing — if CNI has already moved the NIC in, NRI skips entirely.
-func nicExistsInNetns(containerNsPath string, mac string) bool {
-	containerNs, err := netns.GetFromPath(containerNsPath)
-	if err != nil {
-		return false
-	}
-	defer containerNs.Close()
-
-	nhNs, err := nlwrap.NewHandleAt(containerNs)
-	if err != nil {
-		return false
-	}
-	defer nhNs.Close()
-
-	links, err := nhNs.LinkList()
-	if err != nil {
-		return false
-	}
-
-	targetMAC, err := net.ParseMAC(mac)
-	if err != nil {
-		return false
-	}
-
-	for _, link := range links {
-		if link.Attrs().HardwareAddr.String() == targetMAC.String() {
-			return true
-		}
-	}
-	return false
-}
-
 // nsAttachDedicatedNIC moves a dedicated physical NIC (identified by MAC address)
 // into the pod network namespace, assigns IP addresses and routes.
 // This matches the CNI SecondaryEndpointClient behavior:
@@ -895,15 +861,6 @@ func cleanupDedicatedNIC(containerNsPath string, mac string) {
 	}
 
 	klog.V(2).Infof("SwiftV2 cleanup: returned dedicated NIC (MAC %s) to host namespace", mac)
-}
-
-// parseIP32 parses an IP string and returns a /32 IPNet.
-func parseIP32(ipStr string) *net.IPNet {
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
-		return nil
-	}
-	return &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)}
 }
 
 // truncateUID returns the first 8 characters of a UID string for use in

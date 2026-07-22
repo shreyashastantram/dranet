@@ -918,9 +918,43 @@ func TestIntegration_nsAttachDedicatedNIC_MultipleAddresses(t *testing.T) {
 	cleanupDedicatedNIC(nsPath, nicMAC)
 }
 
+// nicExistsInNetns reports whether a NIC with the given MAC address exists in
+// the specified network namespace. Test-only helper used by the dedicated-NIC
+// integration tests to verify placement across a netns move.
+func nicExistsInNetns(containerNsPath string, mac string) bool {
+	containerNs, err := netns.GetFromPath(containerNsPath)
+	if err != nil {
+		return false
+	}
+	defer containerNs.Close()
+
+	nhNs, err := nlwrap.NewHandleAt(containerNs)
+	if err != nil {
+		return false
+	}
+	defer nhNs.Close()
+
+	links, err := nhNs.LinkList()
+	if err != nil {
+		return false
+	}
+
+	targetMAC, err := net.ParseMAC(mac)
+	if err != nil {
+		return false
+	}
+
+	for _, link := range links {
+		if link.Attrs().HardwareAddr.String() == targetMAC.String() {
+			return true
+		}
+	}
+	return false
+}
+
 // TestIntegration_nicExistsInNetns verifies NIC detection by MAC in a namespace.
-// This function is used by nsAttachDedicatedNIC for idempotency — if CNI has
-// already moved the NIC into the pod ns, NRI skips the attach and returns early.
+// nicExistsInNetns is a test-only helper used by the dedicated-NIC integration
+// tests to assert NIC placement across a host<->pod netns move.
 func TestIntegration_nicExistsInNetns(t *testing.T) {
 	skipIfNotRoot(t)
 

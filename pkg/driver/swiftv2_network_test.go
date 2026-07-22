@@ -25,61 +25,6 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-func TestParseIP32(t *testing.T) {
-	tests := []struct {
-		name     string
-		ip       string
-		wantNil  bool
-		wantCIDR string
-	}{
-		{
-			name:     "valid IPv4",
-			ip:       "10.0.1.10",
-			wantNil:  false,
-			wantCIDR: "10.0.1.10/32",
-		},
-		{
-			name:    "invalid IP",
-			ip:      "not-an-ip",
-			wantNil: true,
-		},
-		{
-			name:    "empty string",
-			ip:      "",
-			wantNil: true,
-		},
-		{
-			name:     "loopback",
-			ip:       "127.0.0.1",
-			wantNil:  false,
-			wantCIDR: "127.0.0.1/32",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := parseIP32(tt.ip)
-			if tt.wantNil {
-				if result != nil {
-					t.Errorf("parseIP32(%q) = %v, want nil", tt.ip, result)
-				}
-				return
-			}
-			if result == nil {
-				t.Fatalf("parseIP32(%q) = nil, want %s", tt.ip, tt.wantCIDR)
-			}
-			if result.String() != tt.wantCIDR {
-				t.Errorf("parseIP32(%q) = %s, want %s", tt.ip, result.String(), tt.wantCIDR)
-			}
-			// Verify mask is /32
-			ones, bits := result.Mask.Size()
-			if ones != 32 || bits != 32 {
-				t.Errorf("parseIP32(%q) mask = /%d (bits %d), want /32", tt.ip, ones, bits)
-			}
-		})
-	}
-}
-
 func TestTruncateUID(t *testing.T) {
 	tests := []struct {
 		name string
