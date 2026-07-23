@@ -30,6 +30,12 @@ import (
 	"sigs.k8s.io/dranet/internal/nlwrap"
 )
 
+// swiftV2DelegatedIfName is the pod-side delegated interface name the shared-NIC
+// integration tests expect. Production no longer hardcodes this; nsAttachIPVlanL3
+// computes the lowest free eth<N> at attach time. For a single delegated NIC in a
+// fresh pod ns that resolves to eth1, which these tests assert.
+const swiftV2DelegatedIfName = "eth1"
+
 // hostNS holds the host network namespace fd, saved once before any test runs.
 // This is necessary because the Go runtime may clone new OS threads from a
 // thread that is temporarily in a non-host namespace (during netns.NewNamed →

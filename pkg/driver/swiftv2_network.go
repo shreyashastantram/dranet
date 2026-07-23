@@ -39,16 +39,14 @@ const (
 	// delegated NIC routing. This matches the CNS middleware constant.
 	swiftV2VirtualGW = "169.254.2.1"
 
-	// swiftV2DelegatedIfName is the interface name assigned to delegated NICs
-	// inside the pod namespace (both shared ipvlan children and dedicated NICs
-	// when NRI plumbs them).
-	//
-	// The CNI computes this dynamically as "eth" + strconv.Itoa(endpointIndex),
-	// where endpointIndex starts at 1 (eth0 is the infra NIC from CNI_IFNAME).
-	// Since each pod currently gets exactly one delegated NIC, the index is
-	// always 1. If multi-delegated-NIC pods are ever supported, this should be
-	// replaced with a computed name.
-	swiftV2DelegatedIfName = "eth1"
+	// swiftV2DelegatedIfPrefix is the interface-name prefix for a shared-mode
+	// delegated NIC (ipvlan child) inside the pod namespace. The full name is
+	// built at attach time (see nsAttachIPVlanL3) as prefix+index; the single
+	// SwiftV2 delegated NIC takes index 1 ("eth1"), since eth0 is the infra NIC
+	// the cluster CNI installs before the NRI hook runs. This mirrors the CNI
+	// "eth"+index scheme. Dedicated NICs are not renamed; they keep their host
+	// interface name, matching CNI's FrontendNIC behavior.
+	swiftV2DelegatedIfPrefix = "eth"
 
 	// swiftV2VRFPrefix is the prefix for the per-shared-parent-NIC host VRF.
 	// Linux interface names are capped at 15 bytes, so the full name is the
@@ -505,15 +503,26 @@ func nsAttachIPVlanL3(cfg *NICConfig, containerNsPath string) (*resourceapi.Netw
 	}
 	defer nhPod.Close()
 
-	// Idempotent cleanup of stale state in the pod ns from previous failed attempts.
-	if stale, err := nhPod.LinkByName(ipvlName); err == nil {
-		klog.V(2).Infof("SwiftV2: removing stale ipvlan child %s from pod ns (previous failed attempt)", ipvlName)
-		_ = nhPod.LinkDel(stale)
+	// Idempotent cleanup of stale pod-ns state from a previous failed attempt.
+	// SwiftV2 plumbs a single delegated ipvlan child per pod, so any ipvlan-type
+	// link already in the pod ns is a leftover of ours (whether still named
+	// ipvl-<uid> or already renamed to eth<N>) and is removed.
+	podLinks, err := nhPod.LinkList()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list interfaces in pod netns %s: %w", containerNsPath, err)
 	}
-	if stale, err := nhPod.LinkByName(swiftV2DelegatedIfName); err == nil {
-		klog.V(2).Infof("SwiftV2: removing stale %s from pod ns (previous failed attempt)", swiftV2DelegatedIfName)
-		_ = nhPod.LinkDel(stale)
+	for _, l := range podLinks {
+		if l.Type() == "ipvlan" {
+			klog.V(2).Infof("SwiftV2: removing stale ipvlan child %s from pod ns (previous failed attempt)", l.Attrs().Name)
+			_ = nhPod.LinkDel(l)
+		}
 	}
+
+	// The single delegated NIC takes index 1 ("eth1"): eth0 is the infra NIC the
+	// cluster CNI installs before the NRI hook runs, mirroring the CNI "eth"+index
+	// scheme. A multi-delegated-NIC design would compute the index in the NRI hook
+	// loop instead of fixing it to 1 here.
+	delegatedIfName := swiftV2DelegatedIfPrefix + "1"
 
 	// --- ipvlan child: create from the host-visible parent, then move to pod ---
 
@@ -559,23 +568,23 @@ func nsAttachIPVlanL3(cfg *NICConfig, containerNsPath string) (*resourceapi.Netw
 		return nil, fmt.Errorf("ipvlan interface %s not found in pod netns: %w", ipvlName, err)
 	}
 
-	if err := nhPod.LinkSetName(nsLink, swiftV2DelegatedIfName); err != nil {
-		return nil, fmt.Errorf("failed to rename %s to %s: %w", ipvlName, swiftV2DelegatedIfName, err)
+	if err := nhPod.LinkSetName(nsLink, delegatedIfName); err != nil {
+		return nil, fmt.Errorf("failed to rename %s to %s: %w", ipvlName, delegatedIfName, err)
 	}
 
-	nsLink, err = nhPod.LinkByName(swiftV2DelegatedIfName)
+	nsLink, err = nhPod.LinkByName(delegatedIfName)
 	if err != nil {
-		return nil, fmt.Errorf("renamed interface %s not found in pod netns: %w", swiftV2DelegatedIfName, err)
+		return nil, fmt.Errorf("renamed interface %s not found in pod netns: %w", delegatedIfName, err)
 	}
 
 	if err := nhPod.AddrAdd(nsLink, &netlink.Addr{
 		IPNet: &net.IPNet{IP: podIPv4, Mask: net.CIDRMask(32, 32)},
 	}); err != nil && !errors.Is(err, syscall.EEXIST) {
-		return nil, fmt.Errorf("failed to add IP %s/32 to pod eth1: %w", cfg.PodIP, err)
+		return nil, fmt.Errorf("failed to add IP %s/32 to pod %s: %w", cfg.PodIP, delegatedIfName, err)
 	}
 
 	if err := nhPod.LinkSetUp(nsLink); err != nil {
-		return nil, fmt.Errorf("failed to bring up %s in pod ns: %w", swiftV2DelegatedIfName, err)
+		return nil, fmt.Errorf("failed to bring up %s in pod ns: %w", delegatedIfName, err)
 	}
 
 	// Pod-side static neigh for the virtual gateway.
@@ -598,7 +607,7 @@ func nsAttachIPVlanL3(cfg *NICConfig, containerNsPath string) (*resourceapi.Netw
 		State:        netlink.NUD_PERMANENT,
 	}
 	if err := nhPod.NeighSet(podNeigh); err != nil {
-		return nil, fmt.Errorf("failed to set static neighbor %s -> %s on pod eth1: %w", cfg.GatewayIP, gwMAC, err)
+		return nil, fmt.Errorf("failed to set static neighbor %s -> %s on pod %s: %w", cfg.GatewayIP, gwMAC, delegatedIfName, err)
 	}
 
 	gwRoute := &netlink.Route{
@@ -622,7 +631,7 @@ func nsAttachIPVlanL3(cfg *NICConfig, containerNsPath string) (*resourceapi.Netw
 	}
 
 	return &resourceapi.NetworkDeviceData{
-		InterfaceName:   swiftV2DelegatedIfName,
+		InterfaceName:   delegatedIfName,
 		HardwareAddress: parent.Attrs().HardwareAddr.String(),
 		IPs:             []string{fmt.Sprintf("%s/32", cfg.PodIP)},
 	}, nil
