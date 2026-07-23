@@ -23,7 +23,7 @@ import (
 	"sigs.k8s.io/dranet/pkg/apis"
 )
 
-// NICMode indicates whether a NIC is shared (up to 16 pods per physical NIC)
+// NICMode indicates whether a NIC is shared (multiple pods per physical NIC)
 // or dedicated (1:1 mapping between pod and physical NIC).
 type NICMode string
 
@@ -40,10 +40,11 @@ const (
 //   - Shared mode uses MAC (to find the parent), PodIP, GatewayIP, PodUID
 //   - Dedicated mode uses MAC (to find the NIC), GatewayIP, and Addresses
 type NICConfig struct {
-	// MAC is the NIC's MAC address. For shared mode, this identifies the parent
-	// NIC (shared by all ipvlan children). For dedicated mode, this identifies
-	// the physical NIC to move into the pod namespace. Matching the CNI
-	// SecondaryEndpointClient behavior of looking up NICs by MAC.
+	// MAC is the NIC's MAC address, used to look up the NIC on the host (matching
+	// the CNI SecondaryEndpointClient behavior of identifying NICs by MAC). It is
+	// the same physical NIC in both modes, differing only in role: in shared mode
+	// it is the ipvlan parent shared by all ipvlan children; in dedicated mode it
+	// is moved whole into the pod's network namespace.
 	MAC string
 	// GatewayIP is the virtual gateway IP for routing (e.g., "169.254.2.1").
 	GatewayIP string
@@ -149,11 +150,28 @@ func (s *SwiftV2PodConfigStore) Get(podUID types.UID) map[string]SwiftV2PodConfi
 	return configsCopy
 }
 
-// Delete removes all configurations associated with a given pod UID.
+// Delete removes all configurations associated with a given pod UID, and drops
+// the pod UID from any claim's pod list in claimToPods (it was added there in
+// Set), removing claim entries that become empty so the mapping does not leak
+// stale UIDs.
 func (s *SwiftV2PodConfigStore) Delete(podUID types.UID) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.store, podUID)
+
+	for claimKey, uids := range s.claimToPods {
+		kept := make([]types.UID, 0, len(uids))
+		for _, uid := range uids {
+			if uid != podUID {
+				kept = append(kept, uid)
+			}
+		}
+		if len(kept) == 0 {
+			delete(s.claimToPods, claimKey)
+		} else {
+			s.claimToPods[claimKey] = kept
+		}
+	}
 }
 
 // DeleteByClaim removes all pod configurations associated with the given claim.

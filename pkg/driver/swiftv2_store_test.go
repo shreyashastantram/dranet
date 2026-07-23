@@ -183,3 +183,42 @@ func TestSwiftV2PodConfigStore_DedicatedNICConfig(t *testing.T) {
 		t.Error("expected empty PodIP for dedicated mode")
 	}
 }
+
+func TestSwiftV2PodConfigStore_DeleteRemovesFromClaimToPods(t *testing.T) {
+	store := NewSwiftV2PodConfigStore()
+	claim := types.NamespacedName{Namespace: "ns", Name: "claim"}
+	podA := types.UID("pod-a")
+	podB := types.UID("pod-b")
+	store.Set(podA, "eth1", SwiftV2PodConfig{Mode: NICModeShared}, claim)
+	store.Set(podB, "eth1", SwiftV2PodConfig{Mode: NICModeShared}, claim)
+
+	store.Delete(podA)
+
+	if uids := store.claimToPods[claim]; len(uids) != 1 || uids[0] != podB {
+		t.Fatalf("expected claimToPods[%v] == [%s] after deleting %s, got %v", claim, podB, podA, uids)
+	}
+
+	store.Delete(podB)
+
+	if _, exists := store.claimToPods[claim]; exists {
+		t.Errorf("expected claim entry removed from claimToPods once its last pod is deleted")
+	}
+}
+
+func TestSwiftV2PodConfigStore_DeleteByClaim(t *testing.T) {
+	store := NewSwiftV2PodConfigStore()
+	claim := types.NamespacedName{Namespace: "ns", Name: "claim"}
+	podA := types.UID("pod-a")
+	podB := types.UID("pod-b")
+	store.Set(podA, "eth1", SwiftV2PodConfig{Mode: NICModeShared}, claim)
+	store.Set(podB, "eth1", SwiftV2PodConfig{Mode: NICModeShared}, claim)
+
+	store.DeleteByClaim(claim)
+
+	if store.Get(podA) != nil || store.Get(podB) != nil {
+		t.Error("expected both pods removed from store after DeleteByClaim")
+	}
+	if _, exists := store.claimToPods[claim]; exists {
+		t.Error("expected claim removed from claimToPods after DeleteByClaim")
+	}
+}
