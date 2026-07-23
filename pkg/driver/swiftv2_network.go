@@ -392,7 +392,7 @@ func cleanupSwiftV2NATExemption(parentName string) {
 // NIC by creating an ipvlan L3 child off the parent and moving the child into
 // the pod network namespace.
 //
-// Design (per the SwiftV2 Shared NIC Cross-Subnet Routing one-pager):
+// Design:
 //
 //	One host VRF per shared parent NIC. The parent NIC stays visible in the
 //	host namespace and is enslaved to a per-MAC VRF bound to a per-parent
