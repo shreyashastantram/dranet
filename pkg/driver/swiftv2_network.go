@@ -405,6 +405,25 @@ func cleanupSwiftV2NATExemption(parentName string) {
 //	Enslaving the parent to a VRF selects the per-parent table through the
 //	kernel l3mdev rule, so overlapping customer prefixes on different parent
 //	NICs never collide and no source-prefix rules are required.
+//
+// Expected end state programmed by this function (example: pod IP 10.0.0.5,
+// gateway 169.254.2.1, Azure SDN gateway MAC 12:34:56:78:9a:bc):
+//
+//	Pod netns, delegated NIC eth1:
+//	  addr   10.0.0.5/32 dev eth1
+//	  route  169.254.2.1 dev eth1 scope link              # gateway on-link
+//	  route  default via 169.254.2.1 dev eth1             # all egress via eth1 (overrides CNI eth0 default)
+//	  neigh  169.254.2.1 dev eth1 -> <parent MAC>         # gateway = parent's REAL MAC (same-host ipvlan delivery)
+//
+//	Host, per-parent VRF table T (parent enslaved to VRF sv2<mac>, T chosen by l3mdev):
+//	  route  169.254.2.1 dev <parent> scope link          # gateway on-link
+//	  route  default via 169.254.2.1 dev <parent> onlink  # off-subnet egress to the Azure gateway
+//	  neigh  169.254.2.1 dev <parent> -> 12:34:56:78:9a:bc # gateway = SDN gateway MAC (SmartNIC/VFP intercept)
+//
+// The same gateway IP resolves to two different MACs on purpose: the parent's
+// real MAC inside the pod (ipvlan slaves share it; needed for same-host
+// cross-pod delivery) and the SDN gateway MAC on the host (SmartNIC/VFP
+// intercepts egress framed to it).
 func nsAttachIPVlanL3(cfg *NICConfig, containerNsPath string) (*resourceapi.NetworkDeviceData, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("NICConfig is nil")
@@ -437,8 +456,9 @@ func nsAttachIPVlanL3(cfg *NICConfig, containerNsPath string) (*resourceapi.Netw
 	defer parentRouting.Close()
 	parent := parentRouting.parent
 
-	// Gateway route + neigh in the per-parent VRF table. The parent-side route
-	// lookup for ipvlan L3 child traffic selects this table through l3mdev.
+	// VRF table, route 1 of 2: gateway /32 scope-link route.
+	// Makes the gateway reachable out the parent so the default below can use it
+	// as an on-link next hop.
 	gwLinkRoute := &netlink.Route{
 		Dst:       &net.IPNet{IP: gwIPv4, Mask: net.CIDRMask(32, 32)},
 		LinkIndex: parent.Attrs().Index,
@@ -449,6 +469,8 @@ func nsAttachIPVlanL3(cfg *NICConfig, containerNsPath string) (*resourceapi.Netw
 		return nil, fmt.Errorf("failed to add gateway link route for parent %s table %d: %w", parent.Attrs().Name, parentRouting.table, err)
 	}
 
+	// VRF table, route 2 of 2: default via the gateway (off-subnet egress).
+	// ONLINK because the gateway is only reachable via the scope-link route above.
 	_, defaultDst, _ := net.ParseCIDR("0.0.0.0/0")
 	parentDefault := &netlink.Route{
 		Dst:       defaultDst,
@@ -473,6 +495,8 @@ func nsAttachIPVlanL3(cfg *NICConfig, containerNsPath string) (*resourceapi.Netw
 		return nil, fmt.Errorf("failed to add default route for parent %s table %d: %w", parent.Attrs().Name, parentRouting.table, err)
 	}
 
+	// Parent neigh: pin the gateway to the Azure SDN gateway MAC (no real ARP
+	// responder; SmartNIC/VFP intercepts egress framed to it).
 	sdnGWMAC, _ := net.ParseMAC(swiftV2SDNGatewayMAC)
 	parentNeigh := &netlink.Neigh{
 		LinkIndex:    parent.Attrs().Index,
@@ -610,6 +634,9 @@ func nsAttachIPVlanL3(cfg *NICConfig, containerNsPath string) (*resourceapi.Netw
 		return nil, fmt.Errorf("failed to set static neighbor %s -> %s on pod %s: %w", cfg.GatewayIP, gwMAC, delegatedIfName, err)
 	}
 
+	// Pod route 1 of 2: gateway /32 scope-link route on eth1.
+	// The pod IP is a /32, so this makes the gateway reachable for the default
+	// route below.
 	gwRoute := &netlink.Route{
 		Dst:       &net.IPNet{IP: gwIPv4, Mask: net.CIDRMask(32, 32)},
 		LinkIndex: nsLink.Attrs().Index,
@@ -619,8 +646,9 @@ func nsAttachIPVlanL3(cfg *NICConfig, containerNsPath string) (*resourceapi.Netw
 		return nil, fmt.Errorf("failed to add gateway route in pod ns: %w", err)
 	}
 
-	// Override the CNI-installed default route so all pod egress flows through
-	// eth1 → SmartNIC → VFP/SDN policy rather than out the cluster-network eth0.
+	// Pod route 2 of 2: default via the gateway on eth1.
+	// Overrides the CNI-installed eth0 default so all pod egress leaves via eth1.
+	// RouteReplace (not Add) because the CNI default already exists.
 	podDefault := &netlink.Route{
 		Dst:       defaultDst,
 		Gw:        gwIPv4,
