@@ -1,0 +1,69 @@
+Name:         nicnc-7c-ed-8d-87-6c-04
+Namespace:    default
+Labels:       <none>
+Annotations:  <none>
+API Version:  multitenancy.acn.azure.com/v1alpha1
+Kind:         NICNetworkConfig
+Metadata:
+  Creation Timestamp:  2026-04-20T09:11:26Z
+  Finalizers:
+    finalizers.acn.azure.com/dnc-operations
+  Generation:        3
+  Resource Version:  30549
+  UID:               4370a20d-bddf-47d9-a951-48d3b407e83d
+Spec:
+  Network ID:  fe06c122-6ad1-41e6-bc22-b7e728c592b9
+  Nic Name:    7c:ed:8d:87:6c:04
+  Node Name:   aks-nodes-41132151-vmss000001
+  Pod Allocations:
+    Mtpnc:          sharedpod1
+    Pod Name:       sharedpod1
+    Pod Namespace:  default
+    Mtpnc:          sharedpod2
+    Pod Name:       sharedpod2
+    Pod Namespace:  default
+    Mtpnc:          sharedpod3
+    Pod Name:       sharedpod3
+    Pod Namespace:  default
+  Pod Network:      cust-pn
+  Subnet ID:        /subscriptions/37deca37-c375-4a14-b90a-043849bd2bf1/resourceGroups/sv2-kmurudi-cust-westus2/providers/Microsoft.Network/virtualNetworks/customervnet/subnets/cxsub
+Status:
+  Accelnet Enabled:  true
+  Available I Ps:
+    172.26.0.52
+    172.26.0.53
+    172.26.0.54
+    172.26.0.55
+    172.26.0.56
+    172.26.0.57
+    172.26.0.58
+    172.26.0.59
+    172.26.0.60
+    172.26.0.61
+    172.26.0.62
+    172.26.0.63
+  Cooldown Period In Seconds:  30
+  Device Type:                 acn.azure.com/vnet-nic
+  Gateway IP:                  172.26.0.1
+  Mac Address:                 7c:ed:8d:87:6c:04
+  Nc ID:                       fb9cd5ec-a3e8-43b9-bce0-61b33afc743d
+  Pod Allocations:
+    default/sharedpod1:
+      Allocated IP:   172.26.0.49
+      Mtpnc:          sharedpod1
+      Pod Name:       sharedpod1
+      Pod Namespace:  default
+    default/sharedpod2:
+      Allocated IP:   172.26.0.50
+      Mtpnc:          sharedpod2
+      Pod Name:       sharedpod2
+      Pod Namespace:  default
+    default/sharedpod3:
+      Allocated IP:      172.26.0.51
+      Mtpnc:             sharedpod3
+      Pod Name:          sharedpod3
+      Pod Namespace:     default
+  Primary IP:            172.26.0.48/28
+  Status:                Ready
+  Subnet Address Space:  172.26.0.0/16
+Events:                  <none>

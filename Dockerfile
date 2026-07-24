@@ -27,6 +27,9 @@ COPY . .
 RUN go build -o /go/bin/dranet ./cmd/dranet
 
 # copy binary onto base image
-FROM gcr.io/distroless/base-debian12
+FROM debian:bookworm-slim
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends iptables \
+	&& rm -rf /var/lib/apt/lists/*
 COPY --from=builder --chown=root:root /go/bin/dranet /dranet
 CMD ["/dranet"]

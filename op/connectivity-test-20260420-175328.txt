@@ -1,0 +1,134 @@
+============================================
+DRA Network Connectivity Test Results
+Date: Mon Apr 20 17:53:28 UTC 2026
+============================================
+
+=== Pod IPs ===
+NAME         READY   STATUS    RESTARTS   AGE   IP            NODE                            NOMINATED NODE   READINESS GATES
+debugpod1    1/1     Running   0          47s   10.16.1.158   aks-nodes-41132151-vmss000001   <none>           <none>
+debugpod2    1/1     Running   0          47s   10.16.1.148   aks-nodes-41132151-vmss000001   <none>           <none>
+sharedpod1   1/1     Running   0          8h    10.16.1.149   aks-nodes-41132151-vmss000001   <none>           <none>
+sharedpod2   1/1     Running   0          8h    10.16.1.151   aks-nodes-41132151-vmss000001   <none>           <none>
+sharedpod3   1/1     Running   0          8h    10.16.1.138   aks-nodes-41132151-vmss000001   <none>           <none>
+
+============================================
+TEST 1: Pod-to-Pod ping (debugpod1 -> debugpod2)
+============================================
+debugpod1 (10.16.1.158) -> debugpod2 (10.16.1.148)
+PING 10.16.1.148 (10.16.1.148) 56(84) bytes of data.
+64 bytes from 10.16.1.148: icmp_seq=1 ttl=63 time=0.065 ms
+64 bytes from 10.16.1.148: icmp_seq=2 ttl=63 time=0.054 ms
+64 bytes from 10.16.1.148: icmp_seq=3 ttl=63 time=0.061 ms
+64 bytes from 10.16.1.148: icmp_seq=4 ttl=63 time=0.052 ms
+
+--- 10.16.1.148 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3050ms
+rtt min/avg/max/mdev = 0.052/0.058/0.065/0.005 ms
+
+============================================
+TEST 2: Pod-to-Pod ping (debugpod2 -> debugpod1)
+============================================
+debugpod2 (10.16.1.148) -> debugpod1 (10.16.1.158)
+PING 10.16.1.158 (10.16.1.158) 56(84) bytes of data.
+64 bytes from 10.16.1.158: icmp_seq=1 ttl=63 time=0.074 ms
+64 bytes from 10.16.1.158: icmp_seq=2 ttl=63 time=0.054 ms
+64 bytes from 10.16.1.158: icmp_seq=3 ttl=63 time=0.065 ms
+64 bytes from 10.16.1.158: icmp_seq=4 ttl=63 time=0.053 ms
+
+--- 10.16.1.158 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3075ms
+rtt min/avg/max/mdev = 0.053/0.061/0.074/0.008 ms
+
+============================================
+TEST 3: Pod-to-Pod ping (debugpod1 -> sharedpod1)
+============================================
+debugpod1 (10.16.1.158) -> sharedpod1 (10.16.1.149)
+PING 10.16.1.149 (10.16.1.149) 56(84) bytes of data.
+64 bytes from 10.16.1.149: icmp_seq=1 ttl=63 time=0.060 ms
+64 bytes from 10.16.1.149: icmp_seq=2 ttl=63 time=0.054 ms
+64 bytes from 10.16.1.149: icmp_seq=3 ttl=63 time=0.055 ms
+64 bytes from 10.16.1.149: icmp_seq=4 ttl=63 time=0.038 ms
+
+--- 10.16.1.149 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss, time 3055ms
+rtt min/avg/max/mdev = 0.038/0.051/0.060/0.008 ms
+
+============================================
+TEST 4: DNS resolution (microsoft.com)
+============================================
+;; Got recursion not available from 10.0.0.10
+;; Got recursion not available from 10.0.0.10
+;; Got recursion not available from 10.0.0.10
+;; Got recursion not available from 10.0.0.10
+Server:		10.0.0.10
+Address:	10.0.0.10#53
+
+Non-authoritative answer:
+Name:	microsoft.com
+Address: 150.171.109.145
+Name:	microsoft.com
+Address: 2620:1ec:29:1::70
+Name:	microsoft.com
+Address: 2620:1ec:48:1::70
+
+
+============================================
+TEST 5: Internet ping (microsoft.com from debugpod1)
+============================================
+ping: connect: Network unreachable
+command terminated with exit code 2
+
+============================================
+TEST 6: Internet ping (microsoft.com from debugpod2)
+============================================
+ping: connect: Network unreachable
+command terminated with exit code 2
+
+============================================
+TEST 7: HTTP curl (microsoft.com from debugpod1)
+============================================
+HTTP Status: 000
+Time: 0.001250s
+Remote IP: 
+command terminated with exit code 7
+
+============================================
+TEST 8: HTTP curl (microsoft.com from debugpod2)
+============================================
+HTTP Status: 000
+Time: 0.002693s
+Remote IP: 
+command terminated with exit code 7
+
+============================================
+SUMMARY
+============================================
+
+============================================
+COMMANDS USED
+============================================
+
+export KUBECONFIG=~/akssa/0418/c1
+
+# Create debug pods (yamls at ~/sc/dranet/samples/debugpod1.yaml, debugpod2.yaml)
+kubectl apply -f ~/sc/dranet/samples/debugpod1.yaml -f ~/sc/dranet/samples/debugpod2.yaml
+kubectl wait --for=condition=Ready pod/debugpod1 pod/debugpod2 --timeout=120s
+
+# Get pod IPs
+kubectl get pods -o wide
+
+# Pod-to-pod ping
+kubectl exec debugpod1 -- ping -c 4 -W 5 <debugpod2-IP>
+kubectl exec debugpod2 -- ping -c 4 -W 5 <debugpod1-IP>
+kubectl exec debugpod1 -- ping -c 4 -W 5 <sharedpod1-IP>
+
+# DNS resolution
+kubectl exec debugpod1 -- nslookup microsoft.com
+
+# Internet ping
+kubectl exec debugpod1 -- ping -c 4 -W 5 microsoft.com
+kubectl exec debugpod2 -- ping -c 4 -W 5 microsoft.com
+
+# HTTP curl
+kubectl exec debugpod1 -- curl -s -o /dev/null -w "HTTP Status: %{http_code}\nTime: %{time_total}s\nRemote IP: %{remote_ip}\n" --connect-timeout 10 https://microsoft.com
+kubectl exec debugpod2 -- curl -s -o /dev/null -w "HTTP Status: %{http_code}\nTime: %{time_total}s\nRemote IP: %{remote_ip}\n" --connect-timeout 10 https://microsoft.com

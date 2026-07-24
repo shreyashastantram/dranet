@@ -1,0 +1,75 @@
+- apiVersion: resource.k8s.io/v1
+  kind: ResourceSlice
+  metadata:
+    creationTimestamp: "2026-04-07T19:06:32Z"
+    generateName: aks-nodes-20340232-vmss000000-networking.azure.com-
+    generation: 16436
+    name: aks-nodes-20340232-vmss000000-networking.azure.com-26g7q
+    ownerReferences:
+    - apiVersion: v1
+      controller: true
+      kind: Node
+      name: aks-nodes-20340232-vmss000000
+      uid: 8d7d4c9b-ddbd-4a8b-88bd-3fa8bfea26c7
+    resourceVersion: "3141760"
+    uid: fd7ac71a-0523-44ac-8850-6db6948d25e3
+  spec:
+    devices:
+    - attributes:
+        networking.azure.com/mac:
+          string: 7c:ed:8d:78:94:05
+        networking.azure.com/nic:
+          string: eth1
+        networking.azure.com/shared:
+          bool: true
+        networking.azure.com/subnet:
+          string: ""
+      capacity:
+        networking.azure.com/slots: # subnet and slots shall be updated once dnc-rc is integrated and nicnc is published
+          value: "1"
+      name: eth1
+    driver: networking.azure.com
+    nodeName: aks-nodes-20340232-vmss000000
+    pool:
+      generation: 1
+      name: swift-nics
+      resourceSliceCount: 1
+- apiVersion: resource.k8s.io/v1
+  kind: ResourceSlice
+  metadata:
+    creationTimestamp: "2026-04-07T19:06:56Z"
+    generateName: aks-nodes-20340232-vmss000001-networking.azure.com-
+    generation: 16252
+    name: aks-nodes-20340232-vmss000001-networking.azure.com-twhzh
+    ownerReferences:
+    - apiVersion: v1
+      controller: true
+      kind: Node
+      name: aks-nodes-20340232-vmss000001
+      uid: d44bd0be-b335-4ad4-b506-a457e4830ecb
+    resourceVersion: "3140461"
+    uid: 0d496c6e-061f-48d8-9969-a025addc697e
+  spec:
+    devices:
+    - attributes:
+        networking.azure.com/mac:
+          string: 7c:ed:8d:d0:2a:ce
+        networking.azure.com/nic:
+          string: eth1
+        networking.azure.com/shared:
+          bool: true
+        networking.azure.com/subnet:
+          string: ""
+      capacity:
+        networking.azure.com/slots:
+          value: "1"
+      name: eth1
+    driver: networking.azure.com
+    nodeName: aks-nodes-20340232-vmss000001
+    pool:
+      generation: 1
+      name: swift-nics
+      resourceSliceCount: 1
+kind: List
+metadata:
+  resourceVersion: ""

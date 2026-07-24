@@ -1,0 +1,8 @@
+apiVersion: multitenancy.acn.azure.com/v1alpha1
+kind: PodNetworkInstance
+metadata:
+  name: sharedcxsub1-pni
+  namespace: default
+spec:
+  podNetworkConfigs:
+  - podNetwork: "sharedcxsub1-pn"

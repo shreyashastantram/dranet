@@ -1,0 +1,162 @@
+Name:             sharedpod1
+Namespace:        default
+Priority:         0
+Service Account:  default
+Node:             aks-nodes-41132151-vmss000001/10.16.0.11
+Start Time:       Mon, 20 Apr 2026 09:11:26 +0000
+Labels:           kubernetes.azure.com/pod-network-instance=cust-pni
+Annotations:      <none>
+Status:           Running
+IP:               10.16.1.149
+IPs:
+  IP:  10.16.1.149
+Containers:
+  nginx:
+    Container ID:   containerd://8a317c1c8f4671dcda3f9ef725d3006285d896e4cbca96e3d2ad7e30fde43a4c
+    Image:          nginx:1.25
+    Image ID:       docker.io/library/nginx@sha256:a484819eb60211f5299034ac80f6a681b06f89e65866ce91f356ed7c72af059c
+    Port:           80/TCP
+    Host Port:      0/TCP
+    State:          Running
+      Started:      Mon, 20 Apr 2026 09:12:56 +0000
+    Ready:          True
+    Restart Count:  0
+    Environment:    <none>
+    Mounts:
+      /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-cd8jv (ro)
+Conditions:
+  Type                        Status
+  PodReadyToStartContainers   True 
+  Initialized                 True 
+  Ready                       True 
+  ContainersReady             True 
+  PodScheduled                True 
+Volumes:
+  kube-api-access-cd8jv:
+    Type:                    Projected (a volume that contains injected data from multiple sources)
+    TokenExpirationSeconds:  3607
+    ConfigMapName:           kube-root-ca.crt
+    Optional:                false
+    DownwardAPI:             true
+QoS Class:                   BestEffort
+Node-Selectors:              <none>
+Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+                             node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+Events:
+  Type     Reason                         Age    From               Message
+  ----     ------                         ----   ----               -------
+  Normal   Scheduled                      6m48s  default-scheduler  Successfully assigned default/sharedpod1 to aks-nodes-41132151-vmss000001
+  Warning  FailedPrepareDynamicResources  6m49s  kubelet            Failed to prepare dynamic resources: prepare dynamic resources: NodePrepareResources failed for ResourceClaim sharedpod1-pod-net-6mjg5: CNS claim 6e056af2-f3ba-4e5b-b260-29119ad95133 contain errors: failed to get CNS pod IP config for pod default/sharedpod1: CNS error (code 99): network is not ready - mtpnc is not ready
+  Warning  FailedCreatePodSandBox         5m36s  kubelet            Failed to create pod sandbox: rpc error: code = Unknown desc = NRI RunPodSandbox failed: rpc error: code = Unknown desc = SwiftV2 RunPodSandbox: failed to attach ipvlan L3 for device eth1: failed to add host route for 172.26.0.49: network is down
+  Normal   Pulling                        5m23s  kubelet            Pulling image "nginx:1.25"
+  Normal   Pulled                         5m19s  kubelet            Successfully pulled image "nginx:1.25" in 3.734s (3.734s including waiting). Image size: 71005258 bytes.
+  Normal   Created                        5m19s  kubelet            Created container: nginx
+  Normal   Started                        5m19s  kubelet            Started container nginx
+
+
+Name:             sharedpod2
+Namespace:        default
+Priority:         0
+Service Account:  default
+Node:             aks-nodes-41132151-vmss000001/10.16.0.11
+Start Time:       Mon, 20 Apr 2026 09:14:27 +0000
+Labels:           kubernetes.azure.com/pod-network-instance=cust-pni
+Annotations:      <none>
+Status:           Running
+IP:               10.16.1.151
+IPs:
+  IP:  10.16.1.151
+Containers:
+  nginx:
+    Container ID:   containerd://32476e90c927518b473caddc207a988d79abcb3547cc560279b9d1a593872ec5
+    Image:          nginx:1.25
+    Image ID:       docker.io/library/nginx@sha256:a484819eb60211f5299034ac80f6a681b06f89e65866ce91f356ed7c72af059c
+    Port:           80/TCP
+    Host Port:      0/TCP
+    State:          Running
+      Started:      Mon, 20 Apr 2026 09:14:39 +0000
+    Ready:          True
+    Restart Count:  0
+    Environment:    <none>
+    Mounts:
+      /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-9slg9 (ro)
+Conditions:
+  Type                        Status
+  PodReadyToStartContainers   True 
+  Initialized                 True 
+  Ready                       True 
+  ContainersReady             True 
+  PodScheduled                True 
+Volumes:
+  kube-api-access-9slg9:
+    Type:                    Projected (a volume that contains injected data from multiple sources)
+    TokenExpirationSeconds:  3607
+    ConfigMapName:           kube-root-ca.crt
+    Optional:                false
+    DownwardAPI:             true
+QoS Class:                   BestEffort
+Node-Selectors:              <none>
+Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+                             node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+Events:
+  Type     Reason                  Age    From               Message
+  ----     ------                  ----   ----               -------
+  Normal   Scheduled               3m47s  default-scheduler  Successfully assigned default/sharedpod2 to aks-nodes-41132151-vmss000001
+  Warning  FailedCreatePodSandBox  3m47s  kubelet            Failed to create pod sandbox: rpc error: code = Unknown desc = NRI RunPodSandbox failed: rpc error: code = Unknown desc = SwiftV2 RunPodSandbox: failed to attach ipvlan L3 for device eth1: failed to add host route for 172.26.0.50: network is down
+  Normal   Pulled                  3m36s  kubelet            Container image "nginx:1.25" already present on machine
+  Normal   Created                 3m36s  kubelet            Created container: nginx
+  Normal   Started                 3m36s  kubelet            Started container nginx
+
+
+Name:             sharedpod3
+Namespace:        default
+Priority:         0
+Service Account:  default
+Node:             aks-nodes-41132151-vmss000001/10.16.0.11
+Start Time:       Mon, 20 Apr 2026 09:14:48 +0000
+Labels:           kubernetes.azure.com/pod-network-instance=cust-pni
+Annotations:      <none>
+Status:           Running
+IP:               10.16.1.138
+IPs:
+  IP:  10.16.1.138
+Containers:
+  nginx:
+    Container ID:   containerd://c96ce38b598c037a27ab3e91cafd2e5565ba45d2509db5b5b6c0aec6641ea190
+    Image:          nginx:1.25
+    Image ID:       docker.io/library/nginx@sha256:a484819eb60211f5299034ac80f6a681b06f89e65866ce91f356ed7c72af059c
+    Port:           80/TCP
+    Host Port:      0/TCP
+    State:          Running
+      Started:      Mon, 20 Apr 2026 09:15:02 +0000
+    Ready:          True
+    Restart Count:  0
+    Environment:    <none>
+    Mounts:
+      /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-kvdgk (ro)
+Conditions:
+  Type                        Status
+  PodReadyToStartContainers   True 
+  Initialized                 True 
+  Ready                       True 
+  ContainersReady             True 
+  PodScheduled                True 
+Volumes:
+  kube-api-access-kvdgk:
+    Type:                    Projected (a volume that contains injected data from multiple sources)
+    TokenExpirationSeconds:  3607
+    ConfigMapName:           kube-root-ca.crt
+    Optional:                false
+    DownwardAPI:             true
+QoS Class:                   BestEffort
+Node-Selectors:              <none>
+Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+                             node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+Events:
+  Type     Reason                  Age    From               Message
+  ----     ------                  ----   ----               -------
+  Normal   Scheduled               3m27s  default-scheduler  Successfully assigned default/sharedpod3 to aks-nodes-41132151-vmss000001
+  Warning  FailedCreatePodSandBox  3m27s  kubelet            Failed to create pod sandbox: rpc error: code = Unknown desc = NRI RunPodSandbox failed: rpc error: code = Unknown desc = SwiftV2 RunPodSandbox: failed to attach ipvlan L3 for device eth1: failed to add host route for 172.26.0.51: network is down
+  Normal   Pulled                  3m13s  kubelet            Container image "nginx:1.25" already present on machine
+  Normal   Created                 3m13s  kubelet            Created container: nginx
+  Normal   Started                 3m13s  kubelet            Started container nginx

@@ -33,6 +33,7 @@ import (
 	"github.com/google/cel-go/ext"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/time/rate"
+	"sigs.k8s.io/dranet/pkg/cnsclient"
 	"sigs.k8s.io/dranet/pkg/driver"
 	"sigs.k8s.io/dranet/pkg/inventory"
 	"sigs.k8s.io/dranet/pkg/pcidb"
@@ -46,7 +47,9 @@ import (
 )
 
 const (
-	driverName = "dra.net"
+	driverName     = "dra.net"
+	cnsDriverName  = "networking.azure.com"
+	defaultBaseURL = "http://localhost:10090"
 )
 
 var (
@@ -54,6 +57,7 @@ var (
 	kubeconfig       string
 	bindAddress      string
 	celExpression    string
+	cnsURL           string
 	minPollInterval  time.Duration
 	maxPollInterval  time.Duration
 	pollBurst        int
@@ -69,6 +73,7 @@ func init() {
 	flag.DurationVar(&minPollInterval, "inventory-min-poll-interval", 2*time.Second, "The minimum interval between two consecutive polls of the inventory.")
 	flag.DurationVar(&maxPollInterval, "inventory-max-poll-interval", 1*time.Minute, "The maximum interval between two consecutive polls of the inventory.")
 	flag.IntVar(&pollBurst, "inventory-poll-burst", 5, "The number of polls that can be run in a burst.")
+	flag.StringVar(&cnsURL, "cns-url", "", "URL of the CNS REST API (e.g., http://localhost:10090). If set, enables NIC resource publishing from CNS.")
 
 	flag.Usage = func() {
 		fmt.Fprint(os.Stderr, "Usage: dranet [options]\n\n")
@@ -164,6 +169,21 @@ func main() {
 		inventory.WithMaxPollInterval(maxPollInterval),
 	)
 	opts = append(opts, driver.WithInventory(db))
+
+	if cnsURL == "" {
+		cnsURL = defaultBaseURL
+	}
+
+	if cnsURL != "" {
+		cnsClient, err := cnsclient.New(cnsURL, 0)
+		if err != nil {
+			klog.Fatalf("failed to create CNS client: %v", err)
+		}
+		opts = append(opts, driver.WithCNSClient(cnsClient))
+		opts = append(opts, driver.WithCNSDriverName(cnsDriverName))
+	} else {
+		klog.Info("CNS URL not provided, skipping CNS client initialization and CNS resource publishing")
+	}
 	dranet, err := driver.Start(ctx, driverName, clientset, nodeName, opts...)
 	if err != nil {
 		klog.Fatalf("driver failed to start: %v", err)

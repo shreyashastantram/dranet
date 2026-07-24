@@ -21,10 +21,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/google/cel-go/cel"
 	"sigs.k8s.io/dranet/pkg/apis"
+	"sigs.k8s.io/dranet/pkg/cnsclient"
 	"sigs.k8s.io/dranet/pkg/inventory"
 
 	"github.com/containerd/nri/pkg/stub"
@@ -81,20 +83,47 @@ func WithInventory(db inventoryDB) Option {
 	}
 }
 
+// WithCNSClient sets the CNS HTTP client for Azure NIC resource discovery.
+func WithCNSClient(client *cnsclient.Client) Option {
+	return func(o *NetworkDriver) {
+		o.cnsClient = client
+	}
+}
+
+// WithCNSDriverName sets the DRA driver name used for CNS resource publishing.
+func WithCNSDriverName(name string) Option {
+	return func(o *NetworkDriver) {
+		o.cnsDriverName = name
+	}
+}
+
 type NetworkDriver struct {
-	driverName string
-	nodeName   string
-	kubeClient kubernetes.Interface
-	draPlugin  pluginHelper
-	nriPlugin  stub.Stub
+	driverName    string
+	cnsDriverName string
+	nodeName      string
+	kubeClient    kubernetes.Interface
+	draPlugin     pluginHelper
+	cnsPlugin     pluginHelper // separate kubelet plugin for CNS resources
+	nriPlugin     stub.Stub
 
 	// contains the host interfaces
 	netdb      inventoryDB
 	celProgram cel.Program
 
+	// CNS client for Azure NIC resource discovery
+	cnsClient *cnsclient.Client
+
+	// mu protects inventoryPools and lastCNSNICs for concurrent publishing
+	mu             sync.Mutex
+	inventoryPools map[string]resourceslice.Pool
+	lastCNSNICs    []cnsclient.NICResource
+
 	// Cache the rdma shared mode state
 	rdmaSharedMode bool
 	podConfigStore *PodConfigStore
+	// SwiftV2-specific pod config store for NRI plugin lookups.
+	// Populated during PrepareResourceClaims, read during NRI RunPodSandbox.
+	swiftV2Store *SwiftV2PodConfigStore
 }
 
 type Option func(*NetworkDriver)
@@ -116,6 +145,7 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 		kubeClient:     kubeClient,
 		rdmaSharedMode: rdmaNetnsMode == apis.RdmaNetnsModeShared,
 		podConfigStore: NewPodConfigStore(),
+		swiftV2Store:   NewSwiftV2PodConfigStore(),
 	}
 
 	for _, o := range opts {
@@ -123,7 +153,7 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 	}
 
 	driverPluginPath := filepath.Join(kubeletPluginPath, driverName)
-	err = os.MkdirAll(driverPluginPath, 0750)
+	err = os.MkdirAll(driverPluginPath, 0o750)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create plugin path %s: %v", driverPluginPath, err)
 	}
@@ -183,6 +213,7 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 
 	// register the host network interfaces
 	if plugin.netdb == nil {
+		klog.Info("netdb is not initialized. init-ing now")
 		plugin.netdb = inventory.New()
 	}
 	go func() {
@@ -202,7 +233,43 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 	}()
 
 	// publish available resources
-	go plugin.PublishResources(ctx)
+	// go plugin.PublishResources(ctx)
+
+	// Start a separate kubelet plugin for CNS resources if configured
+	if plugin.cnsClient != nil && plugin.cnsDriverName != "" {
+		cnsPluginPath := filepath.Join(kubeletPluginPath, plugin.cnsDriverName)
+		err = os.MkdirAll(cnsPluginPath, 0o750)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create CNS plugin path %s: %v", cnsPluginPath, err)
+		}
+
+		cnsOpts := []kubeletplugin.Option{
+			kubeletplugin.DriverName(plugin.cnsDriverName),
+			kubeletplugin.NodeName(nodeName),
+			kubeletplugin.KubeClient(kubeClient),
+		}
+		cnsD, err := kubeletplugin.Start(ctx, plugin, cnsOpts...)
+		if err != nil {
+			return nil, fmt.Errorf("start CNS kubelet plugin: %w", err)
+		}
+		plugin.cnsPlugin = cnsD
+		err = wait.PollUntilContextTimeout(ctx, 1*time.Second, 30*time.Second, true, func(context.Context) (bool, error) {
+			status := plugin.cnsPlugin.RegistrationStatus()
+			if status == nil {
+				return false, nil
+			}
+			return status.PluginRegistered, nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("CNS kubelet plugin registration failed: %w", err)
+		}
+		klog.Infof("CNS kubelet plugin registered as %s", plugin.cnsDriverName)
+		go plugin.PublishCNSResources(ctx)
+	} else if plugin.cnsClient != nil {
+		klog.Info("CNS client configured but no CNS driver name set, skipping CNS resource publishing")
+	} else {
+		klog.Info("CNS client not configured, skipping CNS resource discovery and publishing")
+	}
 
 	return plugin, nil
 }
@@ -210,6 +277,10 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 func (np *NetworkDriver) Stop() {
 	// Stop NRI Plugin (it's expected that it returns when fully stopped).
 	np.nriPlugin.Stop()
+	// Stop CNS Plugin if running.
+	if np.cnsPlugin != nil {
+		np.cnsPlugin.Stop()
+	}
 	// Stop DRA Plugin (returns only after it has fully stopped).
 	np.draPlugin.Stop()
 }

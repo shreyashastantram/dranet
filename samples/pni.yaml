@@ -1,0 +1,8 @@
+apiVersion: multitenancy.acn.azure.com/v1alpha1
+kind: PodNetworkInstance
+metadata:
+  name: pni-pon-test
+  namespace: default
+spec:
+  podNetworkConfigs:
+  - podNetwork: "pn-pon-test"

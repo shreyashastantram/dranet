@@ -20,11 +20,15 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"runtime"
+	"time"
 
 	"sigs.k8s.io/dranet/pkg/apis"
 
 	"github.com/insomniacslk/dhcp/dhcpv4/nclient4"
 	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netns"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/dranet/internal/nlwrap"
 )
 
@@ -65,4 +69,65 @@ func getDHCP(ctx context.Context, ifName string) (ip string, routes []apis.Route
 		routes = append(routes, routeCfg)
 	}
 	return
+}
+
+// issueDHCPDiscover broadcasts a single DHCP DISCOVER on the delegated NIC (now
+// in the pod network namespace) and waits for an OFFER, matching the Azure CNI
+// SecondaryEndpointClient behavior. The OFFER is intentionally discarded: the
+// NIC's IP and routes are already programmed from CNS, so the discover exists
+// only to make the host/wireserver create the DNS mapping for the NIC. This is
+// called synchronously on the dedicated attach path and its error is fatal so
+// the plumbing is retried. nclient4 uses DiscoverOffer (DISCOVER + OFFER, no
+// lease), the same scope as CNI's DiscoverRequest.
+//
+// Netns handling is consistent with CNI: in azure-container-networking's
+// addEndpointImpl the NIC is moved into the container netns, then the caller
+// thread enters it via ns.Enter() (runtime.LockOSThread + setns) and runs
+// ConfigureContainerInterfacesAndRoutes -> DiscoverRequest inside it, restoring
+// the host netns with ns.Exit() (setns back + UnlockOSThread). We do the same
+// here because nclient4.New binds an AF_PACKET socket to the interface in the
+// current thread's netns, and the NIC now lives in the pod netns. (getDHCP, by
+// contrast, runs in the host netns because there the NIC is still host-visible.)
+func issueDHCPDiscover(containerNsPath string, ifName string, mac net.HardwareAddr) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	hostNS, err := netns.Get()
+	if err != nil {
+		return fmt.Errorf("dhcp: failed to capture host netns: %w", err)
+	}
+	defer hostNS.Close()
+	// Always restore the calling thread to the host netns before unlocking it.
+	defer func() {
+		if serr := netns.Set(hostNS); serr != nil {
+			klog.Errorf("SwiftV2 dhcp: failed to restore host netns: %v", serr)
+		}
+	}()
+
+	containerNS, err := netns.GetFromPath(containerNsPath)
+	if err != nil {
+		return fmt.Errorf("dhcp: failed to open netns %s: %w", containerNsPath, err)
+	}
+	defer containerNS.Close()
+
+	if err := netns.Set(containerNS); err != nil {
+		return fmt.Errorf("dhcp: failed to enter netns %s: %w", containerNsPath, err)
+	}
+
+	// nclient4 reads the hardware address from the interface itself; mac is used
+	// for logging so the bound identity is visible in the logs.
+	dhclient, err := nclient4.New(ifName)
+	if err != nil {
+		return fmt.Errorf("dhcp: failed to create client on %s (MAC %s): %w", ifName, mac, err)
+	}
+	defer dhclient.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if _, err := dhclient.DiscoverOffer(ctx); err != nil {
+		return fmt.Errorf("dhcp: discover/offer failed on %s (MAC %s): %w", ifName, mac, err)
+	}
+	klog.V(2).Infof("SwiftV2 dhcp: received DHCP offer on %s (MAC %s); wireserver DNS mapping created", ifName, mac)
+	return nil
 }
