@@ -19,9 +19,14 @@ package driver
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/containerd/nri/pkg/api"
+	resourceapi "k8s.io/api/resource/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	metav1apply "k8s.io/client-go/applyconfigurations/meta/v1"
+	resourceapply "k8s.io/client-go/applyconfigurations/resource/v1"
 	"k8s.io/klog/v2"
 )
 
@@ -33,7 +38,7 @@ var cleanupExclusiveNICHook = cleanupExclusiveNIC
 // exclusive NIC (physical NIC move) configurations.
 //
 // For shared NIC: ensures the parent NIC is enslaved to a per-MAC host VRF,
-// creates an IPVLAN L3 child, moves it into the pod namespace, and configures
+// creates an ipvlan L3 child, moves it into the pod namespace, and configures
 // pod IP/routes/neighbors.
 //
 // For exclusive NIC: moves the NIC into the pod namespace, brings it up,
@@ -43,8 +48,11 @@ var cleanupExclusiveNICHook = cleanupExclusiveNIC
 // synchronously for wireserver DNS mapping; failure aborts the attach so the
 // NIC is returned to the host and plumbing can be retried.
 //
-// Claim status reporting (patching ResourceClaim status.devices) is handled by
-// the DRA wiring, not here.
+// After successful attachment, it patches the corresponding ResourceClaim's
+// status.devices[*] with the runtime-observed network data (interface name,
+// MAC, IPs) and Ready/NetworkReady conditions, mirroring the upstream
+// inventory path so consumers can discover pod NIC state via the standard
+// DRA API surface.
 func (np *NetworkDriver) runPodSandboxSecondaryNICs(_ context.Context, pod *api.PodSandbox, configs map[string]SecondaryNICPodConfig) error {
 	ns := getNetworkNamespace(pod)
 	if ns == "" {
@@ -55,21 +63,28 @@ func (np *NetworkDriver) runPodSandboxSecondaryNICs(_ context.Context, pod *api.
 			pod.Namespace, pod.Name, len(configs))
 	}
 
+	// Track ResourceClaim status updates keyed by claim. Multiple devices on the
+	// same pod may belong to the same claim; merge their AllocatedDeviceStatus
+	// entries into a single apply config per claim.
+	statusUpdates := map[types.NamespacedName]*resourceapply.ResourceClaimStatusApplyConfiguration{}
+
 	for deviceName, cfg := range configs {
 		switch cfg.Mode {
 		case NICModeShared:
 			if cfg.NIC.MAC == "" {
 				return fmt.Errorf("secondary NIC RunPodSandbox: device %s has shared mode but empty MAC", deviceName)
 			}
-			klog.V(2).Infof("secondary NIC RunPodSandbox: attaching shared IPVLAN L3 via host VRF for device %s (MAC %s, pod IP %s) on pod %s/%s",
+			klog.V(2).Infof("secondary NIC RunPodSandbox: attaching shared ipvlan L3 via host VRF for device %s (MAC %s, pod IP %s) on pod %s/%s",
 				deviceName, cfg.NIC.MAC, cfg.NIC.PodIP, pod.Namespace, pod.Name)
 
 			networkData, err := nsAttachSecondaryNICHook(cfg.Mode, &cfg.NIC, ns)
 			if err != nil {
-				return fmt.Errorf("secondary NIC RunPodSandbox: failed to attach shared IPVLAN L3 for device %s: %w", deviceName, err)
+				return fmt.Errorf("secondary NIC RunPodSandbox: failed to attach shared ipvlan L3 for device %s: %w", deviceName, err)
 			}
 			klog.V(2).Infof("secondary NIC RunPodSandbox: attached shared NIC %s as %s with IPs %v on pod %s/%s",
 				deviceName, networkData.InterfaceName, networkData.IPs, pod.Namespace, pod.Name)
+
+			np.recordSecondaryNICDeviceStatus(statusUpdates, cfg.Claim, deviceName, cfg.ShareID, networkData)
 
 		case NICModeExclusive:
 			if cfg.NIC.MAC == "" {
@@ -94,19 +109,105 @@ func (np *NetworkDriver) runPodSandboxSecondaryNICs(_ context.Context, pod *api.
 			klog.V(2).Infof("secondary NIC RunPodSandbox: attached exclusive NIC %s as %s with IPs %v on pod %s/%s",
 				deviceName, networkData.InterfaceName, networkData.IPs, pod.Namespace, pod.Name)
 
+			np.recordSecondaryNICDeviceStatus(statusUpdates, cfg.Claim, deviceName, cfg.ShareID, networkData)
+
 		default:
 			return fmt.Errorf("secondary NIC RunPodSandbox: device %s has unsupported NIC mode %q", deviceName, cfg.Mode)
 		}
 	}
 
+	np.applySecondaryNICClaimStatusUpdates(statusUpdates)
 	return nil
 }
 
+// recordSecondaryNICDeviceStatus appends an AllocatedDeviceStatus entry for a
+// secondary NIC device to the claim's status apply config, creating the
+// claim entry on first device. networkData carries the runtime-observed
+// interface name, MAC, and IPs returned by nsAttachSecondaryNIC. shareID is the
+// per-share identifier assigned by the kube-scheduler for ConsumableCapacity
+// devices and is required for the (driver, pool, device, shareID) tuple to
+// match the allocation result.
+func (np *NetworkDriver) recordSecondaryNICDeviceStatus(
+	statusUpdates map[types.NamespacedName]*resourceapply.ResourceClaimStatusApplyConfiguration,
+	claimKey types.NamespacedName,
+	deviceName string,
+	shareID string,
+	networkData *resourceapi.NetworkDeviceData,
+) {
+	if claimKey.Name == "" || np.kubeClient == nil || np.cnsDriverName == "" {
+		return
+	}
+
+	claimStatus, ok := statusUpdates[claimKey]
+	if !ok {
+		claimStatus = resourceapply.ResourceClaimStatus()
+		statusUpdates[claimKey] = claimStatus
+	}
+
+	now := metav1.Now()
+	deviceStatus := resourceapply.
+		AllocatedDeviceStatus().
+		WithDevice(deviceName).
+		WithDriver(np.cnsDriverName).
+		WithPool(secondaryNICsPoolName).
+		WithConditions(
+			metav1apply.Condition().
+				WithType("Ready").
+				WithReason("NetworkDeviceReady").
+				WithStatus(metav1.ConditionTrue).
+				WithLastTransitionTime(now),
+			metav1apply.Condition().
+				WithType("NetworkReady").
+				WithReason("NetworkReady").
+				WithStatus(metav1.ConditionTrue).
+				WithLastTransitionTime(now),
+		).
+		WithNetworkData(resourceapply.NetworkDeviceData().
+			WithInterfaceName(networkData.InterfaceName).
+			WithHardwareAddress(networkData.HardwareAddress).
+			WithIPs(networkData.IPs...),
+		)
+	if shareID != "" {
+		deviceStatus = deviceStatus.WithShareID(shareID)
+	}
+
+	claimStatus.WithDevices(deviceStatus)
+}
+
+// applySecondaryNICClaimStatusUpdates patches each accumulated ResourceClaim
+// status in a non-blocking goroutine with a short timeout, mirroring the
+// upstream inventory NRI flow. Failures are logged but never block pod
+// startup.
+func (np *NetworkDriver) applySecondaryNICClaimStatusUpdates(
+	statusUpdates map[types.NamespacedName]*resourceapply.ResourceClaimStatusApplyConfiguration,
+) {
+	if np.kubeClient == nil {
+		return
+	}
+	for claim, status := range statusUpdates {
+		claimApply := resourceapply.ResourceClaim(claim.Name, claim.Namespace).WithStatus(status)
+		claim := claim
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_, err := np.kubeClient.ResourceV1().ResourceClaims(claim.Namespace).ApplyStatus(ctx,
+				claimApply,
+				metav1.ApplyOptions{FieldManager: np.cnsDriverName, Force: true},
+			)
+			if err != nil {
+				klog.Infof("secondary NIC: failed to update status for claim %s/%s: %v", claim.Namespace, claim.Name, err)
+				return
+			}
+			klog.V(4).Infof("secondary NIC: updated status for claim %s/%s", claim.Namespace, claim.Name)
+		}()
+	}
+}
+
 // stopPodSandboxSecondaryNICs cleans up secondary NIC devices for a pod during
-// the NRI StopPodSandbox hook. This is best-effort — errors are logged but
-// not returned to avoid disrupting pod shutdown.
+// the NRI StopPodSandbox hook. This is best-effort — errors are logged but not
+// returned to avoid disrupting pod shutdown.
 //
-// For shared NIC: no-op — the datapath keeps no per-pod host state. The IPVLAN
+// For shared NIC: no-op — the datapath keeps no per-pod host state. The ipvlan
 // sub-interface is destroyed with the pod's network namespace, and parent VRF
 // state remains shared by later pods on the same NIC.
 //

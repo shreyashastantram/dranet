@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/dranet/pkg/cloudprovider"
 	"sigs.k8s.io/dranet/pkg/cloudprovider/discovery"
 	"sigs.k8s.io/dranet/pkg/cloudprovider/webhook"
+	"sigs.k8s.io/dranet/pkg/cnsclient"
 	"sigs.k8s.io/dranet/pkg/driver"
 	"sigs.k8s.io/dranet/pkg/features"
 	"sigs.k8s.io/dranet/pkg/inventory"
@@ -51,7 +52,9 @@ import (
 )
 
 const (
-	driverName = "dra.net"
+	driverName     = "dra.net"
+	cnsDriverName  = "networking.azure.com"
+	defaultBaseURL = "http://localhost:10090"
 )
 
 var (
@@ -60,6 +63,7 @@ var (
 	bindAddress       string
 	celExpression     string
 	dbPath            string
+	cnsURL            string
 	minPollInterval   time.Duration
 	maxPollInterval   time.Duration
 	pollBurst         int
@@ -89,6 +93,7 @@ func init() {
 	flag.StringVar(&webhookURL, "webhook-url", "", "URL for the webhook provider (required if using webhook for either provider)")
 	flag.StringVar(&kubeletRootDir, "kubelet-root-dir", "/var/lib/kubelet", "The kubelet data directory (its --root-dir). The driver's registration socket lives under <dir>/plugins_registry and its dra.sock under <dir>/plugins/<driver-name>. Set this to match the kubelet --root-dir on clusters that relocate it.")
 	flag.StringVar(&featureGates, "feature-gates", "", "A set of key=value pairs that describe feature gates for alpha/experimental features.")
+	flag.StringVar(&cnsURL, "cns-url", "", "URL of the CNS REST API (e.g., http://localhost:10090). If set, enables NIC resource publishing from CNS.")
 
 	flag.Usage = func() {
 		fmt.Fprint(os.Stderr, "Usage: dranet [options]\n\n")
@@ -212,6 +217,21 @@ func main() {
 
 	db := inventory.New(optsDb...)
 	opts = append(opts, driver.WithInventory(db))
+
+	if cnsURL == "" {
+		cnsURL = defaultBaseURL
+	}
+
+	if cnsURL != "" {
+		cnsClient, err := cnsclient.New(cnsURL, 0)
+		if err != nil {
+			klog.Fatalf("failed to create CNS client: %v", err)
+		}
+		opts = append(opts, driver.WithCNSClient(cnsClient))
+		opts = append(opts, driver.WithCNSDriverName(cnsDriverName))
+	} else {
+		klog.Info("CNS URL not provided, skipping CNS client initialization and CNS resource publishing")
+	}
 	dranet, err := driver.Start(ctx, driverName, clientset, nodeName, opts...)
 	if err != nil {
 		klog.Fatalf("driver failed to start: %v", err)
