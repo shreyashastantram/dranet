@@ -19,6 +19,7 @@ import (
 type fakePluginHelper struct {
 	publishErr         error
 	publishCalled      chan struct{}
+	publishedResources resourceslice.DriverResources
 	registrationStatus *registerapi.RegistrationStatus
 	stopCalled         atomic.Bool
 }
@@ -29,7 +30,8 @@ func newFakePluginHelper() *fakePluginHelper {
 	}
 }
 
-func (m *fakePluginHelper) PublishResources(_ context.Context, _ resourceslice.DriverResources) error {
+func (m *fakePluginHelper) PublishResources(_ context.Context, resources resourceslice.DriverResources) error {
+	m.publishedResources = resources
 	if m.publishCalled != nil {
 		m.publishCalled <- struct{}{}
 	}

@@ -369,8 +369,8 @@ func logCNSNICChanges(prev, curr []cnsclient.NICResource) {
 //
 // Each NIC becomes one device with:
 //   - allowMultipleAllocations: true
-//   - attributes: networking.azure.com/nic (NIC name), networking.azure.com/subnet (full ARM URI),
-//     networking.azure.com/subnetName (extracted name), networking.azure.com/networkID,
+//   - attributes: networking.azure.com/nic (NIC name), networking.azure.com/subnet (subnet GUID),
+//     networking.azure.com/networkID,
 //     networking.azure.com/mac, networking.azure.com/shared
 //   - capacity: networking.azure.com/slots with requestPolicy default=1, validRange min=1 max=1
 func (np *NetworkDriver) buildCNSDevices(nic *cnsclient.NICResource) []resourceapi.Device {
@@ -382,8 +382,8 @@ func (np *NetworkDriver) buildCNSDevices(nic *cnsclient.NICResource) []resourcea
 	if nic.InterfaceName != "" {
 		nicName = nic.InterfaceName
 	}
-	// networking.azure.com/subnet = subnet name provided by CNS.
-	subnet := nic.SubnetName
+	// networking.azure.com/subnet = customer subnet GUID provided by CNS.
+	subnet := nic.SubnetGUID
 	// networking.azure.com/networkID = network ID from CNS
 	networkID := nic.NetworkID
 

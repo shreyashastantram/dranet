@@ -367,6 +367,47 @@ func TestPublishResourcesMetrics(t *testing.T) {
 	})
 }
 
+func TestPublishCNSResourcesPublishesSubnetGUID(t *testing.T) {
+	const (
+		subnetGUID = "369682de-a9c0-4f95-bdb0-5b033e2c9360"
+		subnetName = "workload-subnet"
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/network/nicresources" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(cnsclient.GetNICResourcesResponse{
+			Response: cnsclient.Response{ReturnCode: 0},
+			NICResources: []cnsclient.NICResource{{
+				MacAddress: "aa:bb:cc:dd:ee:01",
+				SubnetGUID: subnetGUID,
+				SubnetName: subnetName,
+				Capacity:   1,
+			}},
+		})
+	}))
+	defer server.Close()
+
+	client, err := cnsclient.New(server.URL, 0)
+	if err != nil {
+		t.Fatalf("failed to create CNS client: %v", err)
+	}
+	plugin := newFakePluginHelper()
+	np := &NetworkDriver{cnsClient: client, cnsPlugin: plugin}
+
+	if err := np.publishCNSResources(context.Background()); err != nil {
+		t.Fatalf("publishCNSResources: %v", err)
+	}
+
+	devices := plugin.publishedResources.Pools[secondaryNICsPoolName].Slices[0].Devices
+	subnet := devices[0].Attributes[cnsAttrSubnet].StringValue
+	if subnet == nil || *subnet != subnetGUID {
+		t.Fatalf("published subnet attribute = %v, want GUID %q (not name %q)", subnet, subnetGUID, subnetName)
+	}
+}
+
 func TestValidateVFMTU(t *testing.T) {
 	testCases := []struct {
 		name         string
@@ -1180,15 +1221,16 @@ func TestPrepareResourceClaims_DRAClaimStillUsesFullPath(t *testing.T) {
 }
 
 func TestUpdateCNSResourceSlicesForClaim(t *testing.T) {
+	plugin := newFakePluginHelper()
 	np := &NetworkDriver{
-		cnsPlugin: newFakePluginHelper(),
+		cnsPlugin: plugin,
 		lastCNSNICs: []cnsclient.NICResource{
-			{MacAddress: "aa:bb:cc:dd:ee:01", InterfaceName: "eth1", SubnetName: "old-subnet", NetworkID: "net-1", Capacity: 16},
+			{MacAddress: "aa:bb:cc:dd:ee:01", InterfaceName: "eth1", SubnetGUID: "old-guid", SubnetName: "old-subnet", NetworkID: "net-1", Capacity: 16},
 		},
 	}
 	claimNICs := []cnsclient.NICResource{
-		{MacAddress: "aa:bb:cc:dd:ee:01", SubnetName: "new-subnet", NetworkID: "net-2", Capacity: 0},
-		{MacAddress: "aa:bb:cc:dd:ee:02", SubnetName: "sn2", Capacity: 1},
+		{MacAddress: "aa:bb:cc:dd:ee:01", SubnetGUID: "new-guid", SubnetName: "new-subnet", NetworkID: "net-2", Capacity: 0},
+		{MacAddress: "aa:bb:cc:dd:ee:02", SubnetGUID: "guid-2", SubnetName: "sn2", Capacity: 1},
 	}
 
 	if err := np.updateCNSResourceSlicesForClaim(context.Background(), claimNICs); err != nil {
@@ -1205,7 +1247,7 @@ func TestUpdateCNSResourceSlicesForClaim(t *testing.T) {
 	if got.Capacity != 0 {
 		t.Errorf("Capacity 0 must be carried forward, got %d", got.Capacity)
 	}
-	if got.SubnetName != "new-subnet" || got.NetworkID != "net-2" {
+	if got.SubnetGUID != "new-guid" || got.SubnetName != "new-subnet" || got.NetworkID != "net-2" {
 		t.Errorf("subnet/vnet not updated: %+v", got)
 	}
 	if got.InterfaceName != "eth1" {
@@ -1214,5 +1256,11 @@ func TestUpdateCNSResourceSlicesForClaim(t *testing.T) {
 	added, ok := byMAC["aa:bb:cc:dd:ee:02"]
 	if !ok || added.Capacity != 1 || added.SubnetName != "sn2" {
 		t.Errorf("new NIC not added correctly: %+v (ok=%v)", added, ok)
+	}
+
+	devices := plugin.publishedResources.Pools[secondaryNICsPoolName].Slices[0].Devices
+	subnet := devices[0].Attributes[cnsAttrSubnet].StringValue
+	if subnet == nil || *subnet != "new-guid" {
+		t.Fatalf("prepare-time published subnet attribute = %v, want GUID %q", subnet, "new-guid")
 	}
 }
