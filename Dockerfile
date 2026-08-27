@@ -14,7 +14,7 @@
 
 # setup cross-compile env
 ARG GOLANG_IMAGE=golang:1.26
-ARG BASE_IMAGE=gcr.io/distroless/base-debian12
+ARG BASE_IMAGE=debian:bookworm-slim
 
 FROM --platform=$BUILDPLATFORM $GOLANG_IMAGE AS builder
 ARG TARGETARCH
@@ -31,5 +31,8 @@ RUN go build -o /go/bin/dranet ./cmd/dranet
 
 # copy binary onto base image
 FROM $BASE_IMAGE
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends iptables \
+	&& rm -rf /var/lib/apt/lists/*
 COPY --from=builder --chown=root:root /go/bin/dranet /dranet
 CMD ["/dranet"]
