@@ -1,0 +1,9 @@
+apiVersion: multitenancy.acn.azure.com/v1alpha1
+kind: PodNetwork
+metadata:
+    name: cust-pn2
+spec:
+  networkID: b83fae7e-49f2-4378-a853-8b4e820bc1cb
+  deviceType: "acn.azure.com/vnet-nic"
+  subnetGUID: "369682de-a9c0-4f95-bdb0-5b033e2c9360"
+  subnetResourceID: /subscriptions/37deca37-c375-4a14-b90a-043849bd2bf1/resourceGroups/sv2-kmurudi-cust-westus2/providers/Microsoft.Network/virtualNetworks/customervnet2/subnets/cxsub

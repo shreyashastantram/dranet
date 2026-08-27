@@ -19,8 +19,6 @@ package driver
 import (
 	"context"
 	"fmt"
-	"net"
-	"strings"
 
 	"github.com/vishvananda/netlink"
 	resourceapi "k8s.io/api/resource/v1"
@@ -57,55 +55,64 @@ func getPodConsumers(claim *resourceapi.ResourceClaim) []podConsumer {
 	return consumers
 }
 
-func (np *NetworkDriver) getPodGoalState(ctx context.Context, pod podConsumer, cache map[types.UID][]cnsclient.PodIPInfo) ([]cnsclient.PodIPInfo, error) {
-	if infos, ok := cache[pod.UID]; ok {
-		klog.Infof("getPodGoalState: cache hit for pod %s/%s UID=%s (%d infos)", pod.Namespace, pod.Name, pod.UID, len(infos))
-		return infos, nil
+// claimGoalState is the CNS RequestClaimResourceInfo result for a claim: the
+// owning pod's IP configs plus the resource-slice properties of its NICs.
+type claimGoalState struct {
+	podIPInfo    []cnsclient.PodIPInfo
+	nicResources []cnsclient.NICResource
+}
+
+func (np *NetworkDriver) getClaimGoalState(ctx context.Context, claimUID types.UID, cache map[types.UID]claimGoalState) (claimGoalState, error) {
+	if gs, ok := cache[claimUID]; ok {
+		klog.Infof("getClaimGoalState: cache hit for claim UID=%s (%d infos, %d nics)", claimUID, len(gs.podIPInfo), len(gs.nicResources))
+		return gs, nil
 	}
 
-	klog.Infof("getPodGoalState: calling CNS GetPodIPConfig for pod %s/%s UID=%s", pod.Namespace, pod.Name, pod.UID)
-	infos, err := np.cnsClient.GetPodIPConfig(ctx, pod.Name, pod.Namespace, string(pod.UID))
+	klog.Infof("getClaimGoalState: calling CNS GetClaimResourceInfo for claim UID=%s", claimUID)
+	resp, err := np.cnsClient.GetClaimResourceInfo(ctx, string(claimUID))
 	if err != nil {
-		return nil, fmt.Errorf("failed to get CNS pod IP config for pod %s/%s: %w", pod.Namespace, pod.Name, err)
+		return claimGoalState{}, fmt.Errorf("failed to get CNS claim resource info for claim %s: %w", claimUID, err)
 	}
-	klog.Infof("getPodGoalState: CNS returned %d PodIPInfo entries for pod %s/%s", len(infos), pod.Namespace, pod.Name)
-	for i, info := range infos {
-		klog.Infof("getPodGoalState: PodIPInfo[%d]: NICType=%q MAC=%q InterfaceName=%q PodIP=%s/%d PrimaryIP=%s GW=%s SharedNIC=%v",
+	gs := claimGoalState{podIPInfo: resp.PodIPInfo, nicResources: resp.NICResources}
+	klog.Infof("getClaimGoalState: CNS returned %d PodIPInfo entries and %d NIC resources for claim %s", len(gs.podIPInfo), len(gs.nicResources), claimUID)
+	for i, info := range gs.podIPInfo {
+		klog.Infof("getClaimGoalState: PodIPInfo[%d]: NICType=%q MAC=%q InterfaceName=%q PodIP=%s/%d PrimaryIP=%s GW=%s SharedNIC=%v",
 			i, info.NICType, info.MacAddress, info.InterfaceName,
 			info.PodIPConfig.IPAddress, info.PodIPConfig.PrefixLength,
 			info.NetworkContainerPrimaryIPConfig.PrimaryIP,
 			info.NetworkContainerPrimaryIPConfig.GatewayIPAddress,
 			info.SharedNIC)
 	}
-	cache[pod.UID] = infos
-	return infos, nil
+	cache[claimUID] = gs
+	return gs, nil
 }
 
-func (np *NetworkDriver) populateSwiftV2StoreForDevice(ctx context.Context, pod podConsumer, deviceName, deviceMAC string, claimKey types.NamespacedName, shareID string, cache map[types.UID][]cnsclient.PodIPInfo) error {
+func (np *NetworkDriver) populateSecondaryNICStoreForDevice(ctx context.Context, claimUID types.UID, pod podConsumer, deviceName string, claimKey types.NamespacedName, shareID string, cache map[types.UID]claimGoalState) error {
 	if np.cnsClient == nil {
-		klog.Infof("populateSwiftV2StoreForDevice: cnsClient is nil, skipping for pod %s/%s device %s", pod.Namespace, pod.Name, deviceName)
+		klog.Infof("populateSecondaryNICStoreForDevice: cnsClient is nil, skipping for pod %s/%s device %s", pod.Namespace, pod.Name, deviceName)
 		return nil
 	}
 
-	klog.Infof("populateSwiftV2StoreForDevice: fetching goal state for pod %s/%s device=%q MAC=%q", pod.Namespace, pod.Name, deviceName, deviceMAC)
-	infos, err := np.getPodGoalState(ctx, pod, cache)
+	klog.Infof("populateSecondaryNICStoreForDevice: fetching goal state for pod %s/%s device=%q", pod.Namespace, pod.Name, deviceName)
+	gs, err := np.getClaimGoalState(ctx, claimUID, cache)
 	if err != nil {
 		return err
 	}
+	infos := gs.podIPInfo
 
-	klog.Infof("populateSwiftV2StoreForDevice: matching MAC=%q against %d CNS PodIPInfo entries", deviceMAC, len(infos))
+	klog.Infof("populateSecondaryNICStoreForDevice: matching device %q against %d CNS PodIPInfo entries", deviceName, len(infos))
 	for i, info := range infos {
-		klog.Infof("populateSwiftV2StoreForDevice: candidate[%d] MAC=%q NICType=%q InterfaceName=%q",
+		klog.Infof("populateSecondaryNICStoreForDevice: candidate[%d] MAC=%q NICType=%q InterfaceName=%q",
 			i, info.MacAddress, info.NICType, info.InterfaceName)
 	}
 
-	info, found := findPodIPInfoByMAC(infos, deviceMAC)
+	info, found := findPodIPInfoByDeviceName(infos, deviceName)
 	if !found {
-		return fmt.Errorf("no CNS PodIPInfo matched pod %s/%s device %s MAC %s — kubelet will retry",
-			pod.Namespace, pod.Name, deviceName, deviceMAC)
+		return fmt.Errorf("no CNS PodIPInfo matched pod %s/%s device %s — kubelet will retry",
+			pod.Namespace, pod.Name, deviceName)
 	}
-	klog.Infof("populateSwiftV2StoreForDevice: matched MAC=%q -> NICType=%q PodIP=%s/%d GW=%s",
-		deviceMAC, info.NICType, info.PodIPConfig.IPAddress, info.PodIPConfig.PrefixLength,
+	klog.Infof("populateSecondaryNICStoreForDevice: matched device %q -> MAC=%q NICType=%q PodIP=%s/%d GW=%s",
+		deviceName, info.MacAddress, info.NICType, info.PodIPConfig.IPAddress, info.PodIPConfig.PrefixLength,
 		info.NetworkContainerPrimaryIPConfig.GatewayIPAddress)
 
 	// Validate required fields from CNS PodIPConfig response.
@@ -115,60 +122,49 @@ func (np *NetworkDriver) populateSwiftV2StoreForDevice(ctx context.Context, pod 
 			pod.Namespace, pod.Name, deviceName, err)
 	}
 
-	cfg, err := buildSwiftV2PodConfig(pod.UID, info)
+	cfg, err := buildSecondaryNICPodConfig(pod.UID, info)
 	if err != nil {
-		return fmt.Errorf("failed to build SwiftV2 config for pod %s/%s device %s: %w", pod.Namespace, pod.Name, deviceName, err)
+		return fmt.Errorf("failed to build secondary NIC config for pod %s/%s device %s: %w", pod.Namespace, pod.Name, deviceName, err)
 	}
 	cfg.Claim = claimKey
 	cfg.ShareID = shareID
 
-	if np.swiftV2Store == nil {
-		np.swiftV2Store = NewSwiftV2PodConfigStore()
+	if np.secondaryNICStore == nil {
+		return fmt.Errorf("secondary NIC config store is not initialized")
 	}
-	np.swiftV2Store.Set(pod.UID, deviceName, cfg, claimKey)
-	klog.Infof("populateSwiftV2StoreForDevice: stored SwiftV2 config for pod %s/%s UID=%s device=%q", pod.Namespace, pod.Name, pod.UID, deviceName)
+	if err := np.secondaryNICStore.Set(pod.UID, deviceName, cfg, claimKey); err != nil {
+		return fmt.Errorf("persist secondary NIC config for pod %s/%s device %s: %w", pod.Namespace, pod.Name, deviceName, err)
+	}
+	klog.Infof("populateSecondaryNICStoreForDevice: stored secondary NIC config for pod %s/%s UID=%s device=%q", pod.Namespace, pod.Name, pod.UID, deviceName)
 	return nil
 }
 
-func findPodIPInfoByMAC(infos []cnsclient.PodIPInfo, mac string) (cnsclient.PodIPInfo, bool) {
-	normalizedMAC, ok := normalizeMAC(mac)
-	if !ok {
-		return cnsclient.PodIPInfo{}, false
-	}
-
+// findPodIPInfoByDeviceName returns the PodIPInfo whose NIC maps to the given
+// ResourceSlice device name. CNS device names are sanitizeMACForK8s(mac), so the
+// match compares the sanitized MAC of each PodIPInfo entry to the device name.
+func findPodIPInfoByDeviceName(infos []cnsclient.PodIPInfo, deviceName string) (cnsclient.PodIPInfo, bool) {
 	for _, info := range infos {
-		candidateMAC, valid := normalizeMAC(info.MacAddress)
-		if !valid || candidateMAC != normalizedMAC {
-			continue
-		}
 		if info.PodIPConfig.IPAddress == "" {
 			continue
 		}
-		return info, true
+		if sanitizeMACForK8s(info.MacAddress) == deviceName {
+			return info, true
+		}
 	}
-
 	return cnsclient.PodIPInfo{}, false
 }
 
-func normalizeMAC(mac string) (string, bool) {
-	parsed, err := net.ParseMAC(mac)
-	if err != nil {
-		return "", false
-	}
-	return strings.ToLower(parsed.String()), true
-}
-
-func buildSwiftV2PodConfig(podUID types.UID, info cnsclient.PodIPInfo) (SwiftV2PodConfig, error) {
+func buildSecondaryNICPodConfig(podUID types.UID, info cnsclient.PodIPInfo) (SecondaryNICPodConfig, error) {
 	if info.MacAddress == "" {
-		return SwiftV2PodConfig{}, fmt.Errorf("missing MAC address")
+		return SecondaryNICPodConfig{}, fmt.Errorf("missing MAC address")
 	}
 	if info.PodIPConfig.IPAddress == "" {
-		return SwiftV2PodConfig{}, fmt.Errorf("missing pod IP address")
+		return SecondaryNICPodConfig{}, fmt.Errorf("missing pod IP address")
 	}
 
 	gatewayIP := info.NetworkContainerPrimaryIPConfig.GatewayIPAddress
 	if gatewayIP == "" {
-		gatewayIP = swiftV2VirtualGW
+		gatewayIP = secondaryNICVirtualGateway
 	}
 
 	prefixLength := int(info.PodIPConfig.PrefixLength)
@@ -177,7 +173,7 @@ func buildSwiftV2PodConfig(podUID types.UID, info cnsclient.PodIPInfo) (SwiftV2P
 	}
 	addressCIDR := fmt.Sprintf("%s/%d", info.PodIPConfig.IPAddress, prefixLength)
 
-	cfg := SwiftV2PodConfig{
+	cfg := SecondaryNICPodConfig{
 		NIC: NICConfig{
 			MAC:       info.MacAddress,
 			GatewayIP: gatewayIP,
@@ -201,7 +197,7 @@ func buildSwiftV2PodConfig(podUID types.UID, info cnsclient.PodIPInfo) (SwiftV2P
 		return cfg, nil
 	}
 
-	cfg.Mode = NICModeDedicated
+	cfg.Mode = NICModeExclusive
 	cfg.NIC.Addresses = []string{addressCIDR}
 	return cfg, nil
 }
@@ -210,7 +206,7 @@ func buildSwiftV2PodConfig(podUID types.UID, info cnsclient.PodIPInfo) (SwiftV2P
 // (MAC address and IP address) needed to configure pod networking. If any
 // required field is missing, it returns an error so the prepare call fails
 // and kubelet retries. Gateway is not strictly required because
-// buildSwiftV2PodConfig falls back to the SwiftV2 virtual gateway.
+// buildSecondaryNICPodConfig falls back to the secondary NIC virtual gateway.
 func validatePodIPInfo(info cnsclient.PodIPInfo) error {
 	if info.MacAddress == "" {
 		return fmt.Errorf("missing MAC address in CNS PodIPConfig response")

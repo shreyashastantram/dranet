@@ -24,31 +24,24 @@ import (
 	"testing"
 )
 
-func TestGetPodGoalState(t *testing.T) {
-	t.Helper()
-
+func TestGetClaimResourceInfo(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("unexpected method %s", r.Method)
 		}
-		if r.URL.Path != requestIPConfigsPath {
+		if r.URL.Path != requestClaimResourceInfoPath {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
 
-		var req IPConfigsRequest
+		var req ClaimResourceInfoRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("failed to decode request: %v", err)
 		}
-
-		var podInfo KubernetesPodInfo
-		if err := json.Unmarshal(req.OrchestratorContext, &podInfo); err != nil {
-			t.Fatalf("failed to decode orchestrator context: %v", err)
-		}
-		if podInfo.PodName != "pod-a" || podInfo.PodNamespace != "ns-a" {
-			t.Fatalf("unexpected pod info: %+v", podInfo)
+		if req.ClaimUID != "claim-123" {
+			t.Fatalf("unexpected claim UID: %q", req.ClaimUID)
 		}
 
-		_ = json.NewEncoder(w).Encode(IPConfigsResponse{
+		_ = json.NewEncoder(w).Encode(ClaimResourceInfoResponse{
 			Response: Response{ReturnCode: 0},
 			PodIPInfo: []PodIPInfo{{
 				PodIPConfig: IPSubnet{IPAddress: "10.0.0.10", PrefixLength: 24},
@@ -65,17 +58,17 @@ func TestGetPodGoalState(t *testing.T) {
 		t.Fatalf("New() failed: %v", err)
 	}
 
-	infos, err := client.GetPodGoalState(context.Background(), "pod-a", "ns-a")
+	resp, err := client.GetClaimResourceInfo(context.Background(), "claim-123")
 	if err != nil {
-		t.Fatalf("GetPodGoalState() failed: %v", err)
+		t.Fatalf("GetClaimResourceInfo() failed: %v", err)
 	}
-	if len(infos) != 1 {
-		t.Fatalf("expected 1 pod IP info, got %d", len(infos))
+	if len(resp.PodIPInfo) != 1 {
+		t.Fatalf("expected 1 pod IP info, got %d", len(resp.PodIPInfo))
 	}
-	if infos[0].MacAddress != "aa:bb:cc:dd:ee:ff" {
-		t.Fatalf("unexpected MAC %s", infos[0].MacAddress)
+	if resp.PodIPInfo[0].MacAddress != "aa:bb:cc:dd:ee:ff" {
+		t.Fatalf("unexpected MAC %s", resp.PodIPInfo[0].MacAddress)
 	}
-	if !infos[0].SharedNIC {
+	if !resp.PodIPInfo[0].SharedNIC {
 		t.Fatal("expected SharedNIC to be true")
 	}
 }

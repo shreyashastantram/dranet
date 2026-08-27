@@ -161,7 +161,7 @@ type NetworkDriver struct {
 
 	clock clock.WithTicker // Injectable clock for testing
 
-	// exclusive NIC-specific pod config store for NRI plugin lookups.
+	// secondary NIC-specific pod config store for NRI plugin lookups.
 	// Populated during PrepareResourceClaims, read during NRI RunPodSandbox.
 	secondaryNICStore *SecondaryNICPodConfigStore
 }
@@ -284,9 +284,9 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 
 	go func() {
 		for i := 0; i < maxAttempts; i++ {
-			err = plugin.nriPlugin.Run(ctx)
-			if err != nil {
-				klog.Infof("NRI plugin failed with error %v", err)
+			runErr := plugin.nriPlugin.Run(ctx)
+			if runErr != nil {
+				klog.Infof("NRI plugin failed with error %v", runErr)
 			}
 			select {
 			case <-ctx.Done():
@@ -305,9 +305,9 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 	}
 	go func() {
 		for i := 0; i < maxAttempts; i++ {
-			err = plugin.netdb.Run(ctx)
-			if err != nil {
-				klog.Infof("Network Device DB failed with error %v", err)
+			runErr := plugin.netdb.Run(ctx)
+			if runErr != nil {
+				klog.Infof("Network Device DB failed with error %v", runErr)
 			}
 			select {
 			case <-ctx.Done():

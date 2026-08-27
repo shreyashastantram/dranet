@@ -19,6 +19,7 @@ package driver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -27,15 +28,15 @@ import (
 	"sigs.k8s.io/dranet/pkg/cnsclient"
 )
 
-func TestBuildSwiftV2PodConfigShared(t *testing.T) {
-	cfg, err := buildSwiftV2PodConfig(types.UID("pod-uid-1"), cnsclient.PodIPInfo{
+func TestBuildSecondaryNICPodConfigShared(t *testing.T) {
+	cfg, err := buildSecondaryNICPodConfig(types.UID("pod-uid-1"), cnsclient.PodIPInfo{
 		PodIPConfig:                     cnsclient.IPSubnet{IPAddress: "10.0.0.10", PrefixLength: 24},
 		NetworkContainerPrimaryIPConfig: cnsclient.IPConfiguration{GatewayIPAddress: "169.254.2.1"},
 		MacAddress:                      "aa:bb:cc:dd:ee:01",
 		SharedNIC:                       true,
 	})
 	if err != nil {
-		t.Fatalf("buildSwiftV2PodConfig() failed: %v", err)
+		t.Fatalf("buildSecondaryNICPodConfig() failed: %v", err)
 	}
 	if cfg.Mode != NICModeShared {
 		t.Fatalf("expected shared mode, got %s", cfg.Mode)
@@ -48,33 +49,33 @@ func TestBuildSwiftV2PodConfigShared(t *testing.T) {
 	}
 }
 
-func TestBuildSwiftV2PodConfigDedicated(t *testing.T) {
-	cfg, err := buildSwiftV2PodConfig(types.UID("pod-uid-1"), cnsclient.PodIPInfo{
+func TestBuildSecondaryNICPodConfigExclusive(t *testing.T) {
+	cfg, err := buildSecondaryNICPodConfig(types.UID("pod-uid-1"), cnsclient.PodIPInfo{
 		PodIPConfig: cnsclient.IPSubnet{IPAddress: "10.0.0.20", PrefixLength: 24},
 		MacAddress:  "aa:bb:cc:dd:ee:02",
 	})
 	if err != nil {
-		t.Fatalf("buildSwiftV2PodConfig() failed: %v", err)
+		t.Fatalf("buildSecondaryNICPodConfig() failed: %v", err)
 	}
-	if cfg.Mode != NICModeDedicated {
-		t.Fatalf("expected dedicated mode, got %s", cfg.Mode)
+	if cfg.Mode != NICModeExclusive {
+		t.Fatalf("expected exclusive mode, got %s", cfg.Mode)
 	}
 	if len(cfg.NIC.Addresses) != 1 || cfg.NIC.Addresses[0] != "10.0.0.20/24" {
-		t.Fatalf("unexpected dedicated addresses %v", cfg.NIC.Addresses)
+		t.Fatalf("unexpected exclusive addresses %v", cfg.NIC.Addresses)
 	}
-	if cfg.NIC.GatewayIP != swiftV2VirtualGW {
+	if cfg.NIC.GatewayIP != secondaryNICVirtualGateway {
 		t.Fatalf("unexpected gateway IP %s", cfg.NIC.GatewayIP)
 	}
 }
 
-func TestPopulateSwiftV2StoreForDevice(t *testing.T) {
+func TestPopulateSecondaryNICStoreForDevice(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req cnsclient.IPConfigsRequest
+		var req cnsclient.ClaimResourceInfoRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("failed to decode request: %v", err)
 		}
 
-		_ = json.NewEncoder(w).Encode(cnsclient.IPConfigsResponse{
+		_ = json.NewEncoder(w).Encode(cnsclient.ClaimResourceInfoResponse{
 			Response: cnsclient.Response{ReturnCode: 0},
 			PodIPInfo: []cnsclient.PodIPInfo{
 				{
@@ -94,24 +95,39 @@ func TestPopulateSwiftV2StoreForDevice(t *testing.T) {
 	}
 
 	np := &NetworkDriver{
-		cnsClient:    client,
-		swiftV2Store: NewSwiftV2PodConfigStore(),
+		cnsClient:         client,
+		secondaryNICStore: NewSecondaryNICPodConfigStore(),
 	}
 
 	pod := podConsumer{UID: types.UID("pod-uid-1"), Name: "pod-a", Namespace: "ns-a"}
-	cache := map[types.UID][]cnsclient.PodIPInfo{}
-	if err := np.populateSwiftV2StoreForDevice(context.Background(), pod, "eth1", "aa:bb:cc:dd:ee:01", types.NamespacedName{Namespace: "ns-a", Name: "claim-a"}, "", cache); err != nil {
-		t.Fatalf("populateSwiftV2StoreForDevice() failed: %v", err)
+	deviceName := sanitizeMACForK8s("aa:bb:cc:dd:ee:01")
+	cache := map[types.UID]claimGoalState{}
+	if err := np.populateSecondaryNICStoreForDevice(context.Background(), types.UID("claim-uid-a"), pod, deviceName, types.NamespacedName{Namespace: "ns-a", Name: "claim-a"}, "", cache); err != nil {
+		t.Fatalf("populateSecondaryNICStoreForDevice() failed: %v", err)
 	}
 
-	got := np.swiftV2Store.Get(pod.UID)
+	got := np.secondaryNICStore.Get(pod.UID)
 	if got == nil {
-		t.Fatal("expected SwiftV2 store entry")
+		t.Fatal("expected secondary NIC store entry")
 	}
-	if got["eth1"].Mode != NICModeShared {
-		t.Fatalf("unexpected mode %s", got["eth1"].Mode)
+	if got[deviceName].Mode != NICModeShared {
+		t.Fatalf("unexpected mode %s", got[deviceName].Mode)
 	}
-	if got["eth1"].NIC.MAC != "aa:bb:cc:dd:ee:01" {
-		t.Fatalf("unexpected MAC %s", got["eth1"].NIC.MAC)
+	if got[deviceName].NIC.MAC != "aa:bb:cc:dd:ee:01" {
+		t.Fatalf("unexpected MAC %s", got[deviceName].NIC.MAC)
+	}
+
+	writeErr := errors.New("checkpoint write failed")
+	failingStore, err := newSecondaryNICPodConfigStore(&failingSecondaryNICCheckpointer{storeErr: writeErr})
+	if err != nil {
+		t.Fatalf("newSecondaryNICPodConfigStore() failed: %v", err)
+	}
+	np.secondaryNICStore = failingStore
+	err = np.populateSecondaryNICStoreForDevice(context.Background(), types.UID("claim-uid-a"), pod, deviceName, types.NamespacedName{Namespace: "ns-a", Name: "claim-a"}, "", cache)
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("populate error = %v, want checkpoint error %v", err, writeErr)
+	}
+	if np.secondaryNICStore.Get(pod.UID) != nil {
+		t.Fatal("failed persistent write populated secondary NIC memory store")
 	}
 }

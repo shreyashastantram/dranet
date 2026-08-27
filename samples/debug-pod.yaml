@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: debugpod1
+  namespace: default
+  labels:
+    kubernetes.azure.com/pod-network-instance: cust-pni
+spec:
+  containers:
+  - name: debug
+    image: nicolaka/netshoot:latest
+    command: ["sleep", "infinity"]
+    resources:
+      claims:
+      - name: pod-net
+
+  resourceClaims:
+  - name: pod-net
+    resourceClaimTemplateName: cxsub-shared-rct
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: debugpod2
+  namespace: default
+  labels:
+    kubernetes.azure.com/pod-network-instance: cust-pni
+spec:
+  containers:
+  - name: debug
+    image: nicolaka/netshoot:latest
+    command: ["sleep", "infinity"]
+    resources:
+      claims:
+      - name: pod-net
+
+  resourceClaims:
+  - name: pod-net
+    resourceClaimTemplateName: cxsub-shared-rct

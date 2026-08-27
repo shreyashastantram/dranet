@@ -18,6 +18,7 @@ package driver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -38,6 +39,7 @@ import (
 	"sigs.k8s.io/dranet/pkg/apis"
 	"sigs.k8s.io/dranet/pkg/cloudprovider"
 	"sigs.k8s.io/dranet/pkg/cloudprovider/webhook"
+	"sigs.k8s.io/dranet/pkg/cnsclient"
 )
 
 func TestPublishResourcesPrometheusMetrics(t *testing.T) {
@@ -249,6 +251,32 @@ func TestUnprepareResourceClaimsMetrics(t *testing.T) {
 			t.Fatalf("CollectAndCompare failed: %v", err)
 		}
 	})
+}
+
+func TestUnprepareResourceClaim_SecondaryNICDeleteFailure(t *testing.T) {
+	deleteErr := errors.New("checkpoint delete failed")
+	checkpointer := &failingSecondaryNICCheckpointer{}
+	secondaryStore, err := newSecondaryNICPodConfigStore(checkpointer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim := types.NamespacedName{Namespace: "ns", Name: "claim"}
+	if err := secondaryStore.Set("pod-1", "device", SecondaryNICPodConfig{}, claim); err != nil {
+		t.Fatal(err)
+	}
+	checkpointer.deleteErr = deleteErr
+	np := &NetworkDriver{
+		podConfigStore:    mustNewPodConfigStore(),
+		secondaryNICStore: secondaryStore,
+	}
+
+	err = np.unprepareResourceClaim(context.Background(), kubeletplugin.NamespacedObject{NamespacedName: claim, UID: "claim-uid"})
+	if !errors.Is(err, deleteErr) {
+		t.Fatalf("unprepare error = %v, want %v", err, deleteErr)
+	}
+	if secondaryStore.Get("pod-1") == nil {
+		t.Fatal("failed unprepare removed secondary NIC memory state")
+	}
 }
 
 func TestClaimPrepareFailedEvent(t *testing.T) {
@@ -904,7 +932,7 @@ func TestMergeDevices(t *testing.T) {
 			expected: []resourcev1.Device{pciDevSnapshot},
 		},
 		{
-			name:      "Live device attribute takes precedence over snapshot",
+			name: "Live device attribute takes precedence over snapshot",
 			live: []resourcev1.Device{{
 				Name: "0000:c0:14.0",
 				Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
@@ -926,7 +954,7 @@ func TestMergeDevices(t *testing.T) {
 				},
 				Capacity: map[resourcev1.QualifiedName]resourcev1.DeviceCapacity{
 					"network-bandwidth": qtyCap("1G"),
-					"other-capacity":     qtyCap("50"),
+					"other-capacity":    qtyCap("50"),
 				},
 			}},
 			expected: []resourcev1.Device{{
@@ -939,7 +967,7 @@ func TestMergeDevices(t *testing.T) {
 				},
 				Capacity: map[resourcev1.QualifiedName]resourcev1.DeviceCapacity{
 					"network-bandwidth": qtyCap("10G"),
-					"other-capacity":     qtyCap("50"),
+					"other-capacity":    qtyCap("50"),
 				},
 			}},
 		},
@@ -952,5 +980,239 @@ func TestMergeDevices(t *testing.T) {
 				t.Errorf("mergeDevices result mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestIsCNSClaim(t *testing.T) {
+	tests := []struct {
+		name          string
+		cnsDriverName string
+		drivers       []string
+		hasAllocation bool
+		expected      bool
+	}{
+		{name: "no CNS driver name configured", drivers: []string{"networking.azure.com"}},
+		{name: "nil allocation", cnsDriverName: "networking.azure.com"},
+		{name: "no matching driver", cnsDriverName: "networking.azure.com", drivers: []string{"dra.net"}, hasAllocation: true},
+		{name: "CNS driver match", cnsDriverName: "networking.azure.com", drivers: []string{"networking.azure.com"}, hasAllocation: true, expected: true},
+		{name: "mixed drivers", cnsDriverName: "networking.azure.com", drivers: []string{"dra.net", "networking.azure.com"}, hasAllocation: true, expected: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			claim := &resourcev1.ResourceClaim{}
+			if test.hasAllocation || len(test.drivers) > 0 {
+				claim.Status.Allocation = &resourcev1.AllocationResult{}
+				for _, driver := range test.drivers {
+					claim.Status.Allocation.Devices.Results = append(claim.Status.Allocation.Devices.Results,
+						resourcev1.DeviceRequestAllocationResult{Driver: driver, Device: "eth1"})
+				}
+			}
+			np := &NetworkDriver{cnsDriverName: test.cnsDriverName}
+			if got := np.isCNSClaim(claim); got != test.expected {
+				t.Errorf("isCNSClaim() = %v, want %v", got, test.expected)
+			}
+		})
+	}
+}
+
+func TestPrepareResourceClaims_RoutesCNSClaimToFastPath(t *testing.T) {
+	draPluginRequestsTotal.Reset()
+	np := &NetworkDriver{
+		driverName:        "dra.net",
+		cnsDriverName:     "networking.azure.com",
+		netdb:             newFakeInventoryDB(),
+		podConfigStore:    mustNewPodConfigStore(),
+		secondaryNICStore: NewSecondaryNICPodConfigStore(),
+	}
+	claim := &resourcev1.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "cns-claim", Namespace: "default", UID: types.UID("cns-claim-uid")},
+		Status: resourcev1.ResourceClaimStatus{Allocation: &resourcev1.AllocationResult{
+			Devices: resourcev1.DeviceAllocationResult{Results: []resourcev1.DeviceRequestAllocationResult{
+				{Driver: "networking.azure.com", Device: "eth1", Request: "nic"},
+			}},
+		}},
+	}
+
+	result, err := np.PrepareResourceClaims(context.Background(), []*resourcev1.ResourceClaim{claim})
+	if err != nil {
+		t.Fatalf("PrepareResourceClaims failed: %v", err)
+	}
+	if prepareResult, ok := result[claim.UID]; ok && prepareResult.Err != nil {
+		t.Fatalf("expected no error for CNS claim, got: %v", prepareResult.Err)
+	}
+	if _, ok := np.podConfigStore.GetPodConfig("some-uid"); ok {
+		t.Error("podConfigStore should be empty for CNS fast path")
+	}
+}
+
+func TestPrepareResourceClaims_CNSFastPathRejectsMultiplePodConsumers(t *testing.T) {
+	draPluginRequestsTotal.Reset()
+	np := &NetworkDriver{
+		driverName:        "dra.net",
+		cnsDriverName:     "networking.azure.com",
+		secondaryNICStore: NewSecondaryNICPodConfigStore(),
+	}
+	claim := &resourcev1.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "cns-claim", Namespace: "default", UID: types.UID("cns-claim-uid")},
+		Status: resourcev1.ResourceClaimStatus{
+			ReservedFor: []resourcev1.ResourceClaimConsumerReference{
+				{Resource: "pods", Name: "pod-a", UID: "pod-uid-a"},
+				{Resource: "pods", Name: "pod-b", UID: "pod-uid-b"},
+			},
+			Allocation: &resourcev1.AllocationResult{Devices: resourcev1.DeviceAllocationResult{
+				Results: []resourcev1.DeviceRequestAllocationResult{{Driver: "networking.azure.com", Device: "eth1", Request: "nic"}},
+			}},
+		},
+	}
+
+	result, err := np.PrepareResourceClaims(context.Background(), []*resourcev1.ResourceClaim{claim})
+	if err != nil {
+		t.Fatalf("PrepareResourceClaims failed: %v", err)
+	}
+	if result[claim.UID].Err == nil || !strings.Contains(result[claim.UID].Err.Error(), "has 2 pod consumers; only one is supported") {
+		t.Fatalf("claim error = %v, want multiple-consumer rejection", result[claim.UID].Err)
+	}
+	if np.secondaryNICStore.Get(types.UID("pod-uid-a")) != nil || np.secondaryNICStore.Get(types.UID("pod-uid-b")) != nil {
+		t.Fatal("secondary NIC store was populated for rejected multi-consumer claim")
+	}
+}
+
+func TestPrepareResourceClaims_CNSFastPathNICNotFound(t *testing.T) {
+	draPluginRequestsTotal.Reset()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/network/requestclaimresourceinfo" {
+			http.NotFound(w, request)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(cnsclient.ClaimResourceInfoResponse{
+			Response: cnsclient.Response{ReturnCode: 0},
+			PodIPInfo: []cnsclient.PodIPInfo{{
+				PodIPConfig: cnsclient.IPSubnet{IPAddress: "10.0.0.10", PrefixLength: 24},
+				MacAddress:  "aa:bb:cc:dd:ee:99",
+			}},
+		})
+	}))
+	defer server.Close()
+
+	client, err := cnsclient.New(server.URL, 0)
+	if err != nil {
+		t.Fatalf("failed to create CNS client: %v", err)
+	}
+	np := &NetworkDriver{
+		driverName:        "dra.net",
+		cnsDriverName:     "networking.azure.com",
+		netdb:             newFakeInventoryDB(),
+		cnsClient:         client,
+		podConfigStore:    mustNewPodConfigStore(),
+		secondaryNICStore: NewSecondaryNICPodConfigStore(),
+	}
+	claim := cnsFastPathClaim("cns-claim-uid", "pod-uid-1", "eth1")
+
+	result, err := np.PrepareResourceClaims(context.Background(), []*resourcev1.ResourceClaim{claim})
+	if err != nil {
+		t.Fatalf("PrepareResourceClaims failed: %v", err)
+	}
+	if result[claim.UID].Err == nil || !strings.Contains(result[claim.UID].Err.Error(), "no CNS PodIPInfo matched") {
+		t.Fatalf("claim error = %v, want unmatched CNS PodIPInfo error", result[claim.UID].Err)
+	}
+}
+
+func TestPrepareResourceClaims_CNSFastPathNilClient(t *testing.T) {
+	draPluginRequestsTotal.Reset()
+	np := &NetworkDriver{
+		driverName:        "dra.net",
+		cnsDriverName:     "networking.azure.com",
+		netdb:             newFakeInventoryDB(),
+		podConfigStore:    mustNewPodConfigStore(),
+		secondaryNICStore: NewSecondaryNICPodConfigStore(),
+	}
+	claim := cnsFastPathClaim("cns-claim-uid", "pod-uid-1", "eth1")
+
+	result, err := np.PrepareResourceClaims(context.Background(), []*resourcev1.ResourceClaim{claim})
+	if err != nil {
+		t.Fatalf("PrepareResourceClaims failed: %v", err)
+	}
+	if result[claim.UID].Err == nil || !strings.Contains(result[claim.UID].Err.Error(), "CNS client not configured") {
+		t.Fatalf("claim error = %v, want CNS client error", result[claim.UID].Err)
+	}
+}
+
+func cnsFastPathClaim(claimUID, podUID, device string) *resourcev1.ResourceClaim {
+	return &resourcev1.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "cns-claim", Namespace: "default", UID: types.UID(claimUID)},
+		Status: resourcev1.ResourceClaimStatus{
+			ReservedFor: []resourcev1.ResourceClaimConsumerReference{{APIGroup: "", Resource: "pods", Name: "test-pod", UID: types.UID(podUID)}},
+			Allocation: &resourcev1.AllocationResult{Devices: resourcev1.DeviceAllocationResult{
+				Results: []resourcev1.DeviceRequestAllocationResult{{Driver: "networking.azure.com", Device: device, Request: "nic"}},
+			}},
+		},
+	}
+}
+
+func TestPrepareResourceClaims_DRAClaimStillUsesFullPath(t *testing.T) {
+	draPluginRequestsTotal.Reset()
+	np := &NetworkDriver{
+		driverName:        "dra.net",
+		cnsDriverName:     "networking.azure.com",
+		netdb:             newFakeInventoryDB(),
+		podConfigStore:    mustNewPodConfigStore(),
+		secondaryNICStore: NewSecondaryNICPodConfigStore(),
+		eventRecorder:     record.NewFakeRecorder(10),
+	}
+	claim := &resourcev1.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "dra-claim", Namespace: "default", UID: types.UID("dra-claim-uid")},
+		Status: resourcev1.ResourceClaimStatus{
+			ReservedFor: []resourcev1.ResourceClaimConsumerReference{{APIGroup: "", Resource: "pods", Name: "test-pod", UID: "pod-uid-1"}},
+			Allocation: &resourcev1.AllocationResult{Devices: resourcev1.DeviceAllocationResult{
+				Results: []resourcev1.DeviceRequestAllocationResult{{Driver: "dra.net", Device: "nonexistent-device", Request: "req1"}},
+			}},
+		},
+	}
+
+	result, err := np.PrepareResourceClaims(context.Background(), []*resourcev1.ResourceClaim{claim})
+	if err != nil {
+		t.Fatalf("PrepareResourceClaims failed: %v", err)
+	}
+	if result[claim.UID].Err == nil {
+		t.Error("expected error for DRA claim with nonexistent device via full path")
+	}
+}
+
+func TestUpdateCNSResourceSlicesForClaim(t *testing.T) {
+	np := &NetworkDriver{
+		cnsPlugin: newFakePluginHelper(),
+		lastCNSNICs: []cnsclient.NICResource{
+			{MacAddress: "aa:bb:cc:dd:ee:01", InterfaceName: "eth1", SubnetName: "old-subnet", NetworkID: "net-1", Capacity: 16},
+		},
+	}
+	claimNICs := []cnsclient.NICResource{
+		{MacAddress: "aa:bb:cc:dd:ee:01", SubnetName: "new-subnet", NetworkID: "net-2", Capacity: 0},
+		{MacAddress: "aa:bb:cc:dd:ee:02", SubnetName: "sn2", Capacity: 1},
+	}
+
+	if err := np.updateCNSResourceSlicesForClaim(context.Background(), claimNICs); err != nil {
+		t.Fatalf("updateCNSResourceSlicesForClaim: %v", err)
+	}
+	byMAC := make(map[string]cnsclient.NICResource, len(np.lastCNSNICs))
+	for _, nic := range np.lastCNSNICs {
+		byMAC[nic.MacAddress] = nic
+	}
+	if len(np.lastCNSNICs) != 2 {
+		t.Fatalf("expected 2 NICs after merge, got %d: %+v", len(np.lastCNSNICs), np.lastCNSNICs)
+	}
+	got := byMAC["aa:bb:cc:dd:ee:01"]
+	if got.Capacity != 0 {
+		t.Errorf("Capacity 0 must be carried forward, got %d", got.Capacity)
+	}
+	if got.SubnetName != "new-subnet" || got.NetworkID != "net-2" {
+		t.Errorf("subnet/vnet not updated: %+v", got)
+	}
+	if got.InterfaceName != "eth1" {
+		t.Errorf("InterfaceName should be preserved, got %q", got.InterfaceName)
+	}
+	added, ok := byMAC["aa:bb:cc:dd:ee:02"]
+	if !ok || added.Capacity != 1 || added.SubnetName != "sn2" {
+		t.Errorf("new NIC not added correctly: %+v (ok=%v)", added, ok)
 	}
 }

@@ -29,163 +29,6 @@ import (
 	"sigs.k8s.io/dranet/pkg/cnsclient"
 )
 
-func TestIntegration_PrepareResourceClaims_PopulatesSwiftV2Store(t *testing.T) {
-	skipIfNotRoot(t)
-
-	testCases := []struct {
-		name          string
-		podIPInfo     cnsclient.PodIPInfo
-		expectedMode  NICMode
-		expectedAddrs []string
-	}{
-		{
-			name: "shared",
-			podIPInfo: cnsclient.PodIPInfo{
-				PodIPConfig:                     cnsclient.IPSubnet{IPAddress: "10.0.0.10", PrefixLength: 24},
-				NetworkContainerPrimaryIPConfig: cnsclient.IPConfiguration{GatewayIPAddress: "169.254.2.1"},
-				SharedNIC:                       true,
-			},
-			expectedMode:  NICModeShared,
-			expectedAddrs: []string{"10.0.0.10/32"},
-		},
-		{
-			name: "dedicated",
-			podIPInfo: cnsclient.PodIPInfo{
-				PodIPConfig: cnsclient.IPSubnet{IPAddress: "10.0.0.20", PrefixLength: 24},
-			},
-			expectedMode:  NICModeDedicated,
-			expectedAddrs: []string{"10.0.0.20/24"},
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			ifaceName := "tp" + tc.name + "swift0"
-			deviceMAC := testDummyNIC(t, ifaceName)
-
-			requestCount := 0
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				requestCount++
-				if r.Method != http.MethodPost {
-					t.Fatalf("unexpected method %s", r.Method)
-				}
-				if r.URL.Path != "/network/requestipconfigs" {
-					t.Fatalf("unexpected path %s", r.URL.Path)
-				}
-
-				var req cnsclient.IPConfigsRequest
-				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-					t.Fatalf("failed to decode request: %v", err)
-				}
-
-				var podInfo cnsclient.KubernetesPodInfo
-				if err := json.Unmarshal(req.OrchestratorContext, &podInfo); err != nil {
-					t.Fatalf("failed to decode orchestrator context: %v", err)
-				}
-				if podInfo.PodName != "pod-a" {
-					t.Fatalf("unexpected pod name %s", podInfo.PodName)
-				}
-				if podInfo.PodNamespace != "ns-a" {
-					t.Fatalf("unexpected pod namespace %s", podInfo.PodNamespace)
-				}
-
-				resp := tc.podIPInfo
-				resp.MacAddress = deviceMAC
-				if err := json.NewEncoder(w).Encode(cnsclient.IPConfigsResponse{
-					Response:  cnsclient.Response{ReturnCode: 0},
-					PodIPInfo: []cnsclient.PodIPInfo{resp},
-				}); err != nil {
-					t.Fatalf("failed to encode response: %v", err)
-				}
-			}))
-			defer server.Close()
-
-			client, err := cnsclient.New(server.URL, 0)
-			if err != nil {
-				t.Fatalf("failed to create CNS client: %v", err)
-			}
-
-			fakeNetDB := newFakeInventoryDB()
-			fakeNetDB.SetNetInterfaceName("device-1", ifaceName)
-
-			np := &NetworkDriver{
-				driverName:     "test.driver",
-				netdb:          fakeNetDB,
-				cnsClient:      client,
-				podConfigStore: NewPodConfigStore(),
-				swiftV2Store:   NewSwiftV2PodConfigStore(),
-			}
-
-			claim := &resourcev1.ResourceClaim{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "claim-a",
-					Namespace: "ns-a",
-					UID:       types.UID("claim-uid-1"),
-				},
-				Status: resourcev1.ResourceClaimStatus{
-					ReservedFor: []resourcev1.ResourceClaimConsumerReference{{
-						APIGroup: "",
-						Resource: "pods",
-						Name:     "pod-a",
-						UID:      types.UID("pod-uid-1"),
-					}},
-					Allocation: &resourcev1.AllocationResult{
-						Devices: resourcev1.DeviceAllocationResult{
-							Results: []resourcev1.DeviceRequestAllocationResult{{
-								Driver:  "test.driver",
-								Device:  "device-1",
-								Request: "req-1",
-							}},
-						},
-					},
-				},
-			}
-
-			result, err := np.PrepareResourceClaims(context.Background(), []*resourcev1.ResourceClaim{claim})
-			if err != nil {
-				t.Fatalf("PrepareResourceClaims() failed: %v", err)
-			}
-			if result[claim.UID].Err != nil {
-				t.Fatalf("PrepareResourceClaims() returned claim error: %v", result[claim.UID].Err)
-			}
-			if requestCount != 1 {
-				t.Fatalf("expected 1 CNS request, got %d", requestCount)
-			}
-
-			podCfg, ok := np.podConfigStore.Get(types.UID("pod-uid-1"), "device-1")
-			if !ok {
-				t.Fatal("expected pod config store entry")
-			}
-			if podCfg.NetworkInterfaceConfigInHost.Interface.Name != ifaceName {
-				t.Fatalf("unexpected host interface name %s", podCfg.NetworkInterfaceConfigInHost.Interface.Name)
-			}
-
-			swiftCfgs := np.swiftV2Store.Get(types.UID("pod-uid-1"))
-			if swiftCfgs == nil {
-				t.Fatal("expected SwiftV2 store entry")
-			}
-			swiftCfg, ok := swiftCfgs["device-1"]
-			if !ok {
-				t.Fatal("expected SwiftV2 device config")
-			}
-			if swiftCfg.Mode != tc.expectedMode {
-				t.Fatalf("unexpected mode %s", swiftCfg.Mode)
-			}
-			if swiftCfg.NIC.MAC != deviceMAC {
-				t.Fatalf("unexpected MAC %s", swiftCfg.NIC.MAC)
-			}
-			if len(swiftCfg.InterfaceConfig.Interface.Addresses) != len(tc.expectedAddrs) {
-				t.Fatalf("unexpected addresses %v", swiftCfg.InterfaceConfig.Interface.Addresses)
-			}
-			for i := range tc.expectedAddrs {
-				if swiftCfg.InterfaceConfig.Interface.Addresses[i] != tc.expectedAddrs[i] {
-					t.Fatalf("unexpected address at %d: got %s want %s", i, swiftCfg.InterfaceConfig.Interface.Addresses[i], tc.expectedAddrs[i])
-				}
-			}
-		})
-	}
-}
-
 func TestIntegration_PrepareCNSResourceClaim_FastPath(t *testing.T) {
 	testCases := []struct {
 		name          string
@@ -204,11 +47,11 @@ func TestIntegration_PrepareCNSResourceClaim_FastPath(t *testing.T) {
 			expectedAddrs: []string{"10.0.0.30/32"},
 		},
 		{
-			name: "dedicated fast path",
+			name: "exclusive fast path",
 			podIPInfo: cnsclient.PodIPInfo{
 				PodIPConfig: cnsclient.IPSubnet{IPAddress: "10.0.0.40", PrefixLength: 24},
 			},
-			expectedMode:  NICModeDedicated,
+			expectedMode:  NICModeExclusive,
 			expectedAddrs: []string{"10.0.0.40/24"},
 		},
 	}
@@ -218,7 +61,6 @@ func TestIntegration_PrepareCNSResourceClaim_FastPath(t *testing.T) {
 			// NIC state comes from CNS, not netlink — no root required.
 			deviceMAC := "aa:bb:cc:dd:ee:42"
 			deviceName := sanitizeMACForK8s(deviceMAC)
-			cnsName := "cns-nic-" + tc.name[:3]
 
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
@@ -226,15 +68,14 @@ func TestIntegration_PrepareCNSResourceClaim_FastPath(t *testing.T) {
 					_ = json.NewEncoder(w).Encode(cnsclient.GetNICResourcesResponse{
 						Response: cnsclient.Response{ReturnCode: 0},
 						NICResources: []cnsclient.NICResource{{
-							Name:       cnsName,
 							MacAddress: deviceMAC,
-							SubnetID:   "/subscriptions/sub1/subnets/sn1",
+							SubnetName: "sn1",
 						}},
 					})
-				case "/network/requestipconfigs":
+				case "/network/requestclaimresourceinfo":
 					resp := tc.podIPInfo
 					resp.MacAddress = deviceMAC
-					_ = json.NewEncoder(w).Encode(cnsclient.IPConfigsResponse{
+					_ = json.NewEncoder(w).Encode(cnsclient.ClaimResourceInfoResponse{
 						Response:  cnsclient.Response{ReturnCode: 0},
 						PodIPInfo: []cnsclient.PodIPInfo{resp},
 					})
@@ -250,12 +91,12 @@ func TestIntegration_PrepareCNSResourceClaim_FastPath(t *testing.T) {
 			}
 
 			np := &NetworkDriver{
-				driverName:     "dra.net",
-				cnsDriverName:  "networking.azure.com",
-				netdb:          newFakeInventoryDB(),
-				cnsClient:      client,
-				podConfigStore: NewPodConfigStore(),
-				swiftV2Store:   NewSwiftV2PodConfigStore(),
+				driverName:        "dra.net",
+				cnsDriverName:     "networking.azure.com",
+				netdb:             newFakeInventoryDB(),
+				cnsClient:         client,
+				podConfigStore:    mustNewPodConfigStore(),
+				secondaryNICStore: NewSecondaryNICPodConfigStore(),
 			}
 
 			claim := &resourcev1.ResourceClaim{
@@ -292,31 +133,31 @@ func TestIntegration_PrepareCNSResourceClaim_FastPath(t *testing.T) {
 			}
 
 			// Fast path should NOT populate podConfigStore
-			if _, ok := np.podConfigStore.GetPodConfigs(types.UID("pod-uid-1")); ok {
+			if _, ok := np.podConfigStore.GetPodConfig(types.UID("pod-uid-1")); ok {
 				t.Fatal("podConfigStore should be empty for CNS fast path")
 			}
 
-			// Fast path SHOULD populate swiftV2Store
-			swiftCfgs := np.swiftV2Store.Get(types.UID("pod-uid-1"))
-			if swiftCfgs == nil {
-				t.Fatal("expected SwiftV2 store entry")
+			// Fast path SHOULD populate secondaryNICStore
+			secondaryNICConfigs := np.secondaryNICStore.Get(types.UID("pod-uid-1"))
+			if secondaryNICConfigs == nil {
+				t.Fatal("expected secondary NIC store entry")
 			}
-			swiftCfg, ok := swiftCfgs[deviceName]
+			secondaryNICConfig, ok := secondaryNICConfigs[deviceName]
 			if !ok {
-				t.Fatalf("expected SwiftV2 device config for %s", deviceName)
+				t.Fatalf("expected secondary NIC device config for %s", deviceName)
 			}
-			if swiftCfg.Mode != tc.expectedMode {
-				t.Fatalf("expected mode %s, got %s", tc.expectedMode, swiftCfg.Mode)
+			if secondaryNICConfig.Mode != tc.expectedMode {
+				t.Fatalf("expected mode %s, got %s", tc.expectedMode, secondaryNICConfig.Mode)
 			}
-			if swiftCfg.NIC.MAC != deviceMAC {
-				t.Fatalf("expected MAC %s, got %s", deviceMAC, swiftCfg.NIC.MAC)
+			if secondaryNICConfig.NIC.MAC != deviceMAC {
+				t.Fatalf("expected MAC %s, got %s", deviceMAC, secondaryNICConfig.NIC.MAC)
 			}
-			if len(swiftCfg.InterfaceConfig.Interface.Addresses) != len(tc.expectedAddrs) {
-				t.Fatalf("unexpected addresses %v", swiftCfg.InterfaceConfig.Interface.Addresses)
+			if len(secondaryNICConfig.InterfaceConfig.Interface.Addresses) != len(tc.expectedAddrs) {
+				t.Fatalf("unexpected addresses %v", secondaryNICConfig.InterfaceConfig.Interface.Addresses)
 			}
 			for i := range tc.expectedAddrs {
-				if swiftCfg.InterfaceConfig.Interface.Addresses[i] != tc.expectedAddrs[i] {
-					t.Fatalf("address[%d]: got %s, want %s", i, swiftCfg.InterfaceConfig.Interface.Addresses[i], tc.expectedAddrs[i])
+				if secondaryNICConfig.InterfaceConfig.Interface.Addresses[i] != tc.expectedAddrs[i] {
+					t.Fatalf("address[%d]: got %s, want %s", i, secondaryNICConfig.InterfaceConfig.Interface.Addresses[i], tc.expectedAddrs[i])
 				}
 			}
 		})

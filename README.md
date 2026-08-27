@@ -103,14 +103,15 @@ helm install -n kube-system dranet oci://registry.k8s.io/networking/charts/drane
 
 For available configuration options, see the [chart README](deployments/helm/dranet/README.md).
 
-DRANET persists prepared pod device configuration in a local bbolt database so
-NRI hooks can continue initialization after a driver restart. The default DB
-path is `/var/run/dranet/dranet.db`, so deployment manifests must mount
+DRANET persists prepared pod device configuration in local bbolt databases so
+NRI hooks can continue initialization after a driver restart. Generic DRA state
+uses `/var/run/dranet/dranet.db`; secondary NIC attachment intent uses
+`/var/run/dranet/secondary-nic.db`. Deployment manifests must mount
 `/var/run/dranet` as writable storage (hostPath with `DirectoryOrCreate` in the
 provided manifests).
 
-You can override the DB path with `--db-path`; set it to an empty
-string to disable persistence and use in-memory state.
+Override the paths with `--db-path` and `--secondary-nic-db-path`. Set either
+flag to an empty string to use in-memory state for that store.
 
 ### How to Use It
 

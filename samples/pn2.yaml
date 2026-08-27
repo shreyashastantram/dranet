@@ -1,0 +1,10 @@
+apiVersion: multitenancy.acn.azure.com/v1alpha1
+kind: PodNetwork
+metadata:
+    name: cust-pn
+spec:
+  networkID: fe06c122-6ad1-41e6-bc22-b7e728c592b9
+  deviceType: "acn.azure.com/vnet-nic"
+  subnetGUID: "7e0a923b-03c0-47a3-bc7c-dfb5cf68607b"
+  subnetResourceID: /subscriptions/37deca37-c375-4a14-b90a-043849bd2bf1/resourceGroups/sv2-kmurudi-cust-westus2/providers/Microsoft.Network/virtualNetworks/customervnet/subnets/cxsub
+  subnetAllocationMode: PrefixBlock

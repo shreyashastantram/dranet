@@ -23,35 +23,64 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 )
 
 const (
-	defaultBaseURL       = "http://localhost:10090"
-	defaultTimeout       = 5 * time.Second
-	getNICResourcePath   = "/network/nicresources"
-	requestIPConfigsPath = "/network/requestipconfigs"
+	defaultBaseURL               = "http://localhost:10090"
+	defaultTimeout               = 5 * time.Second
+	getNICResourcePath           = "/network/nicresources"
+	requestClaimResourceInfoPath = "/network/requestclaimresourceinfo"
 )
 
-// NICResource represents a network interface resource from the VM.
+// NICResource represents a network interface resource from the VM, as returned
+// by the CNS GetNICResources API.
 type NICResource struct {
-	Name          string `json:"name"`
-	MacAddress    string `json:"macAddress"`
-	InterfaceName string `json:"interfaceName,omitempty"`
-	NetworkID     string `json:"networkID,omitempty"`
-	VMUniqueID    string `json:"vmUniqueID,omitempty"`
-	SubnetID      string `json:"subnetID,omitempty"`
-	Capacity      int    `json:"capacity,omitempty"`
-	// PrimaryIP is the host-underlay primary IP for the NIC, formatted as
-	// a CIDR using the VNet *subnet* address-space prefix length (e.g.,
-	// "165.0.0.16/20"). Sourced from CNS, which combines the
-	// NICNetworkConfig CRD's Status.PrimaryIP (the IP) with
-	// Status.SubnetAddressSpace (the prefix). Dranet assigns this address
-	// to the parent NIC on the host so the kernel installs a connected
-	// route covering every pod IP in the customer subnet.
-	// Empty when CNS doesn't provide it (older CNS or no NICNetworkConfig
-	// CRD for this NIC).
-	PrimaryIP string `json:"primaryIP,omitempty"`
+	MacAddress             string `json:"macAddress"`
+	InterfaceName          string `json:"interfaceName,omitempty"`
+	InterfaceCompartmentID string `json:"interfaceCompartmentID,omitempty"`
+	NetworkID              string `json:"networkID,omitempty"`
+	VMUniqueID             string `json:"vmUniqueID,omitempty"`
+	// SubnetGUID is the GUID of the customer subnet the NIC belongs to.
+	SubnetGUID string `json:"subnetGUID,omitempty"`
+	// SubnetName is the subnet name extracted from the subnet ARM resource ID.
+	SubnetName string `json:"subnetName,omitempty"`
+	// Capacity is the resource-slice capacity (number of pods schedulable on the
+	// NIC). CNS sends it as a string on the wire ("0"/"1"/"16"); the custom
+	// (Un)MarshalJSON below (de)serialize it to/from int so callers use an int.
+	Capacity int `json:"-"`
+}
+
+// MarshalJSON renders Capacity as the wire string field "capacity" while keeping
+// the Go field an int.
+func (n NICResource) MarshalJSON() ([]byte, error) {
+	type alias NICResource
+	return json.Marshal(struct {
+		alias
+		Capacity string `json:"capacity"`
+	}{
+		alias:    alias(n),
+		Capacity: strconv.Itoa(n.Capacity),
+	})
+}
+
+// UnmarshalJSON parses the wire string field "capacity" into the int Capacity
+// field. A missing or non-numeric value decodes to 0 (not schedulable).
+func (n *NICResource) UnmarshalJSON(data []byte) error {
+	type alias NICResource
+	aux := struct {
+		*alias
+		Capacity string `json:"capacity"`
+	}{alias: (*alias)(n)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	n.Capacity = 0
+	if c, err := strconv.Atoi(aux.Capacity); err == nil {
+		n.Capacity = c
+	}
+	return nil
 }
 
 // Response represents the CNS API response status.
@@ -64,13 +93,6 @@ type Response struct {
 type GetNICResourcesResponse struct {
 	Response     Response      `json:"response"`
 	NICResources []NICResource `json:"nicResources"`
-}
-
-// KubernetesPodInfo identifies a pod in CNS orchestrator context.
-type KubernetesPodInfo struct {
-	PodName      string `json:"podName"`
-	PodNamespace string `json:"podNamespace"`
-	PodUID       string `json:"podUID,omitempty"`
 }
 
 // IPSubnet describes an IP and its prefix length.
@@ -107,29 +129,26 @@ type PodIPInfo struct {
 	NetworkContainerID              string          `json:"networkContainerID,omitempty"`
 }
 
-// IPConfigsRequest is the CNS request body for pod IP configuration lookup.
-type IPConfigsRequest struct {
-	DesiredIPAddresses           []string        `json:"desiredIPAddresses"`
-	PodInterfaceID               string          `json:"podInterfaceID"`
-	InfraContainerID             string          `json:"infraContainerID"`
-	OrchestratorContext          json.RawMessage `json:"orchestratorContext"`
-	Ifname                       string          `json:"ifname"`
-	SecondaryInterfacesExist     bool            `json:"secondaryInterfacesExist"`
-	BackendInterfaceExist        bool            `json:"BackendInterfaceExist"`
-	BackendInterfaceMacAddresses []string        `json:"BacknendInterfaceMacAddress"`
+// ClaimResourceInfoRequest is the CNS request body for the RequestClaimResourceInfo
+// API. ClaimUID is the DRA ResourceClaim UID; CNS resolves it to the owning pod.
+type ClaimResourceInfoRequest struct {
+	ClaimUID string `json:"claimUID"`
 }
 
-// IPConfigsResponse is the CNS response for pod IP configuration lookup.
-type IPConfigsResponse struct {
-	PodIPInfo []PodIPInfo `json:"podIPInfo"`
-	Response  Response    `json:"response"`
+// ClaimResourceInfoResponse is the CNS response for the RequestClaimResourceInfo
+// API. It returns the owning pod's IP configs plus the resource-slice properties
+// of every NIC allocated to the pod.
+type ClaimResourceInfoResponse struct {
+	Response     Response      `json:"response"`
+	PodIPInfo    []PodIPInfo   `json:"podIPInfo"`
+	NICResources []NICResource `json:"nicResources"`
 }
 
 // Client is an HTTP client for communicating with the CNS REST API.
 type Client struct {
-	httpClient     *http.Client
-	nicResourceURL url.URL
-	ipConfigsURL   url.URL
+	httpClient           *http.Client
+	nicResourceURL       url.URL
+	claimResourceInfoURL url.URL
 }
 
 // New creates a new CNS client configured with the given base URL and timeout.
@@ -150,15 +169,15 @@ func New(baseURL string, timeout time.Duration) (*Client, error) {
 
 	nicURL := *base
 	nicURL.Path = getNICResourcePath
-	ipConfigsURL := *base
-	ipConfigsURL.Path = requestIPConfigsPath
+	claimURL := *base
+	claimURL.Path = requestClaimResourceInfoPath
 
 	return &Client{
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
-		nicResourceURL: nicURL,
-		ipConfigsURL:   ipConfigsURL,
+		nicResourceURL:       nicURL,
+		claimResourceInfoURL: claimURL,
 	}, nil
 }
 
@@ -192,36 +211,17 @@ func (c *Client) GetNICResources(ctx context.Context) ([]NICResource, error) {
 	return resp.NICResources, nil
 }
 
-// GetPodGoalState returns the CNS pod IP configurations for a pod.
-func (c *Client) GetPodGoalState(ctx context.Context, podName, podNamespace string) ([]PodIPInfo, error) {
-	return c.GetPodIPConfig(ctx, podName, podNamespace, "")
-}
-
-// GetPodIPConfig returns the CNS pod IP configurations for a pod identified
-// by name, namespace, and UID. It calls the CNS RequestIPConfigs endpoint
-// which is idempotent: it returns existing IP assignments or allocates new
-// ones if none exist. The podUID is included in the orchestrator context
-// for future CNS-side disambiguation but is currently ignored by CNS.
-func (c *Client) GetPodIPConfig(ctx context.Context, podName, podNamespace, podUID string) ([]PodIPInfo, error) {
-	orchestratorContext, err := json.Marshal(KubernetesPodInfo{
-		PodName:      podName,
-		PodNamespace: podNamespace,
-		PodUID:       podUID,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal orchestrator context: %w", err)
-	}
-
-	reqBody := IPConfigsRequest{
-		OrchestratorContext: orchestratorContext,
-	}
-
+// GetClaimResourceInfo calls the CNS RequestClaimResourceInfo endpoint for the
+// given DRA ResourceClaim UID. CNS resolves the claim UID to the owning pod via
+// its MTPNC and returns the pod's IP configurations together with the
+// resource-slice properties of every NIC allocated to the pod.
+func (c *Client) GetClaimResourceInfo(ctx context.Context, claimUID string) (*ClaimResourceInfoResponse, error) {
 	var body bytes.Buffer
-	if err := json.NewEncoder(&body).Encode(reqBody); err != nil {
-		return nil, fmt.Errorf("failed to encode CNS IPConfigsRequest: %w", err)
+	if err := json.NewEncoder(&body).Encode(ClaimResourceInfoRequest{ClaimUID: claimUID}); err != nil {
+		return nil, fmt.Errorf("failed to encode CNS ClaimResourceInfoRequest: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.ipConfigsURL.String(), &body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.claimResourceInfoURL.String(), &body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build request: %w", err)
 	}
@@ -237,14 +237,14 @@ func (c *Client) GetPodIPConfig(ctx context.Context, podName, podNamespace, podU
 		return nil, fmt.Errorf("CNS returned HTTP %d", res.StatusCode)
 	}
 
-	var resp IPConfigsResponse
+	var resp ClaimResourceInfoResponse
 	if err := json.NewDecoder(res.Body).Decode(&resp); err != nil {
-		return nil, fmt.Errorf("failed to decode CNS IPConfigsResponse: %w", err)
+		return nil, fmt.Errorf("failed to decode CNS ClaimResourceInfoResponse: %w", err)
 	}
 
 	if resp.Response.ReturnCode != 0 {
 		return nil, fmt.Errorf("CNS error (code %d): %s", resp.Response.ReturnCode, resp.Response.Message)
 	}
 
-	return resp.PodIPInfo, nil
+	return &resp, nil
 }

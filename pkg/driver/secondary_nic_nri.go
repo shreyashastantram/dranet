@@ -38,7 +38,7 @@ var cleanupExclusiveNICHook = cleanupExclusiveNIC
 // exclusive NIC (physical NIC move) configurations.
 //
 // For shared NIC: ensures the parent NIC is enslaved to a per-MAC host VRF,
-// creates an ipvlan L3 child, moves it into the pod namespace, and configures
+// creates an IPVLAN L3 child, moves it into the pod namespace, and configures
 // pod IP/routes/neighbors.
 //
 // For exclusive NIC: moves the NIC into the pod namespace, brings it up,
@@ -74,12 +74,12 @@ func (np *NetworkDriver) runPodSandboxSecondaryNICs(_ context.Context, pod *api.
 			if cfg.NIC.MAC == "" {
 				return fmt.Errorf("secondary NIC RunPodSandbox: device %s has shared mode but empty MAC", deviceName)
 			}
-			klog.V(2).Infof("secondary NIC RunPodSandbox: attaching shared ipvlan L3 via host VRF for device %s (MAC %s, pod IP %s) on pod %s/%s",
+			klog.V(2).Infof("secondary NIC RunPodSandbox: attaching shared IPVLAN L3 via host VRF for device %s (MAC %s, pod IP %s) on pod %s/%s",
 				deviceName, cfg.NIC.MAC, cfg.NIC.PodIP, pod.Namespace, pod.Name)
 
 			networkData, err := nsAttachSecondaryNICHook(cfg.Mode, &cfg.NIC, ns)
 			if err != nil {
-				return fmt.Errorf("secondary NIC RunPodSandbox: failed to attach shared ipvlan L3 for device %s: %w", deviceName, err)
+				return fmt.Errorf("secondary NIC RunPodSandbox: failed to attach shared IPVLAN L3 for device %s: %w", deviceName, err)
 			}
 			klog.V(2).Infof("secondary NIC RunPodSandbox: attached shared NIC %s as %s with IPs %v on pod %s/%s",
 				deviceName, networkData.InterfaceName, networkData.IPs, pod.Namespace, pod.Name)
@@ -207,7 +207,7 @@ func (np *NetworkDriver) applySecondaryNICClaimStatusUpdates(
 // the NRI StopPodSandbox hook. This is best-effort — errors are logged but not
 // returned to avoid disrupting pod shutdown.
 //
-// For shared NIC: no-op — the datapath keeps no per-pod host state. The ipvlan
+// For shared NIC: no-op — the datapath keeps no per-pod host state. The IPVLAN
 // sub-interface is destroyed with the pod's network namespace, and parent VRF
 // state remains shared by later pods on the same NIC.
 //
