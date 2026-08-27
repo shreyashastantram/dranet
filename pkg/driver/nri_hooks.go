@@ -130,18 +130,38 @@ func (np *NetworkDriver) RunPodSandbox(ctx context.Context, pod *api.PodSandbox)
 		nriPluginRequestsLatencySeconds.WithLabelValues(methodRunPodSandbox, status).Observe(time.Since(start).Seconds())
 
 	}()
-	// get the devices associated to this Pod
-	podConfig, ok := np.podConfigStore.GetPodConfig(types.UID(pod.GetUid()))
-	if !ok {
+	// A pod can carry upstream DRA devices, secondary NIC devices, or both.
+	podUID := types.UID(pod.GetUid())
+	podConfig, hasDRAConfig := np.podConfigStore.GetPodConfig(podUID)
+	var secondaryNICConfigs map[string]SecondaryNICPodConfig
+	if np.secondaryNICStore != nil {
+		secondaryNICConfigs = np.secondaryNICStore.Get(podUID)
+	}
+	// If secondary NIC persistence is disabled, a driver restart between prepare
+	// and this hook loses the attachment intent and this pod appears unmanaged.
+	if !hasDRAConfig && secondaryNICConfigs == nil {
 		return nil
 	}
-	err := np.runPodSandbox(ctx, pod, podConfig)
-	if err != nil {
-		status = statusFailed
-	} else {
+
+	// Process upstream DRA devices if present.
+	if hasDRAConfig {
+		if err := np.runPodSandbox(ctx, pod, podConfig); err != nil {
+			status = statusFailed
+			return err
+		}
 		status = statusSuccess
 	}
-	return err
+
+	// Process secondary NIC devices if present.
+	if secondaryNICConfigs != nil {
+		if err := np.runPodSandboxSecondaryNICs(ctx, pod, secondaryNICConfigs); err != nil {
+			status = statusFailed
+			return err
+		}
+		status = statusSuccess
+	}
+
+	return nil
 }
 func (np *NetworkDriver) runPodSandbox(ctx context.Context, pod *api.PodSandbox, podConfig PodConfig) error {
 	logger := klog.FromContext(ctx)
@@ -356,17 +376,38 @@ func (np *NetworkDriver) StopPodSandbox(ctx context.Context, pod *api.PodSandbox
 		logger.V(2).Info("StopPodSandbox finished", "duration", time.Since(start))
 		nriPluginRequestsLatencySeconds.WithLabelValues(methodStopPodSandbox, status).Observe(time.Since(start).Seconds())
 	}()
-	// get the devices associated to this Pod
-	podConfig, ok := np.podConfigStore.GetPodConfig(types.UID(pod.GetUid()))
-	if !ok {
+	// A pod can carry upstream DRA devices, secondary NIC devices, or both.
+	podUID := types.UID(pod.GetUid())
+	podConfig, hasDRAConfig := np.podConfigStore.GetPodConfig(podUID)
+	var secondaryNICConfigs map[string]SecondaryNICPodConfig
+	if np.secondaryNICStore != nil {
+		secondaryNICConfigs = np.secondaryNICStore.Get(podUID)
+	}
+	if !hasDRAConfig && secondaryNICConfigs == nil {
 		return nil
 	}
-	err := np.stopPodSandbox(ctx, pod, podConfig)
-	if err != nil {
-		status = statusFailed
-	} else {
-		status = statusSuccess
+
+	var err error
+	// Process upstream DRA cleanup if present.
+	if hasDRAConfig {
+		if err = np.stopPodSandbox(ctx, pod, podConfig); err != nil {
+			status = statusFailed
+		} else {
+			status = statusSuccess
+		}
 	}
+
+	// Process exclusive NIC cleanup if present. We intentionally keep the exclusive NIC
+	// store entry: containerd may tear down and retry the sandbox
+	// (StopPodSandbox -> RunPodSandbox) without re-calling PrepareResourceClaims;
+	// the entry is removed when the claim is unprepared.
+	if secondaryNICConfigs != nil {
+		np.stopPodSandboxSecondaryNICs(pod, secondaryNICConfigs)
+		if status != statusFailed {
+			status = statusSuccess
+		}
+	}
+
 	return err
 }
 
@@ -447,9 +488,6 @@ func (np *NetworkDriver) RemovePodSandbox(ctx context.Context, pod *api.PodSandb
 		nriPluginRequestsTotal.WithLabelValues(methodRemovePodSandbox, status).Inc()
 		nriPluginRequestsLatencySeconds.WithLabelValues(methodRemovePodSandbox, status).Observe(time.Since(start).Seconds())
 	}()
-	if _, ok := np.podConfigStore.GetPodConfig(types.UID(pod.GetUid())); !ok {
-		return nil
-	}
 	err := np.removePodSandbox(ctx, pod)
 	if err != nil {
 		status = statusFailed

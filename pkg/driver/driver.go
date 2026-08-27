@@ -24,8 +24,8 @@ import (
 	"time"
 
 	"github.com/google/cel-go/cel"
-	"sigs.k8s.io/dranet/pkg/apis"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/dranet/pkg/apis"
 	"sigs.k8s.io/dranet/pkg/inventory"
 
 	"github.com/containerd/nri/pkg/stub"
@@ -93,6 +93,14 @@ func WithDBPath(path string) Option {
 	}
 }
 
+// WithSecondaryNICDBPath sets the path for the persistent secondary NIC config database.
+// If not set, the secondary NIC store remains in memory.
+func WithSecondaryNICDBPath(path string) Option {
+	return func(o *NetworkDriver) {
+		o.secondaryNICDBPath = path
+	}
+}
+
 // WithKubeletRootDir sets the kubelet data directory (its --root-dir). The
 // driver's registration socket lives under <dir>/plugins_registry and its
 // dra.sock under <dir>/plugins. Set this when the kubelet runs with a
@@ -116,15 +124,20 @@ type NetworkDriver struct {
 	celProgram cel.Program
 
 	// Cache the rdma shared mode state
-	rdmaSharedMode bool
-	podConfigStore *PodConfigStore
-	dbPath         string // path for persistent bbolt database; empty means in-memory
+	rdmaSharedMode     bool
+	podConfigStore     *PodConfigStore
+	dbPath             string // path for persistent bbolt database; empty means in-memory
+	secondaryNICDBPath string
 
 	// kubeletRootDir is the kubelet data directory (its --root-dir). Set when the
 	// kubelet runs with a non-default --root-dir.
 	kubeletRootDir string
 
 	clock clock.WithTicker // Injectable clock for testing
+
+	// exclusive NIC-specific pod config store for NRI plugin lookups.
+	// Populated during PrepareResourceClaims, read during NRI RunPodSandbox.
+	secondaryNICStore *SecondaryNICPodConfigStore
 }
 
 type Option func(*NetworkDriver)
@@ -175,6 +188,24 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 		return nil, fmt.Errorf("failed to initialize pod config store: %v", err)
 	}
 	plugin.podConfigStore = store
+
+	var secondaryNICCheckpointer SecondaryNICCheckpointer
+	if plugin.secondaryNICDBPath != "" {
+		secondaryNICCheckpointer, err = newSecondaryNICBoltCheckpointer(plugin.secondaryNICDBPath)
+		if err != nil {
+			plugin.podConfigStore.Close()
+			return nil, fmt.Errorf("failed to open secondary NIC config database at %s: %v", plugin.secondaryNICDBPath, err)
+		}
+	}
+	secondaryNICStore, err := newSecondaryNICPodConfigStore(secondaryNICCheckpointer)
+	if err != nil {
+		if secondaryNICCheckpointer != nil {
+			secondaryNICCheckpointer.Close()
+		}
+		plugin.podConfigStore.Close()
+		return nil, fmt.Errorf("failed to initialize secondary NIC config store: %v", err)
+	}
+	plugin.secondaryNICStore = secondaryNICStore
 
 	driverPluginPath := filepath.Join(plugin.kubeletRootDir, "plugins", driverName)
 	err = os.MkdirAll(driverPluginPath, 0750)
@@ -370,6 +401,11 @@ func (np *NetworkDriver) Stop(ctxCancel context.CancelFunc) {
 	// Close the pod config store.
 	if err := np.podConfigStore.Close(); err != nil {
 		klog.Errorf("Failed to close pod config database: %v", err)
+	}
+	if np.secondaryNICStore != nil {
+		if err := np.secondaryNICStore.Close(); err != nil {
+			klog.Errorf("Failed to close secondary NIC config database: %v", err)
+		}
 	}
 
 	klog.Info("Driver stopped.")

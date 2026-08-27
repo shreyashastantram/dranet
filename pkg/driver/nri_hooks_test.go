@@ -655,7 +655,7 @@ func TestRemovePodSandboxMetrics(t *testing.T) {
 				t.Fatalf("CollectAndCompare failed: %v", err)
 			}
 			if tc.expectSuccess {
-				if got := testutil.ToFloat64(nriPluginRequestsTotal.WithLabelValues(methodRemovePodSandbox, statusNoop)); got != float64(1) {
+				if got := testutil.ToFloat64(nriPluginRequestsTotal.WithLabelValues(methodRemovePodSandbox, statusSuccess)); got != float64(1) {
 					t.Errorf("Expected 1 success, got %f", got)
 				}
 				if got := testutil.ToFloat64(nriPluginRequestsTotal.WithLabelValues(methodRemovePodSandbox, statusFailed)); got != float64(0) {
