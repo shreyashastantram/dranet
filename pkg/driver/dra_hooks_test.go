@@ -1024,6 +1024,23 @@ func TestMergeDevices(t *testing.T) {
 	}
 }
 
+func TestBuildCNSDevicesPublishesAllCapacities(t *testing.T) {
+	for _, capacity := range []int{0, 1, 16} {
+		t.Run(fmt.Sprintf("capacity-%d", capacity), func(t *testing.T) {
+			np := &NetworkDriver{}
+			devices := np.buildCNSDevices(&cnsclient.NICResource{
+				MacAddress: "aa:bb:cc:dd:ee:01",
+				Capacity:   capacity,
+			})
+
+			slots := devices[0].Capacity[cnsCapSlots].Value
+			if got := slots.Value(); got != int64(capacity) {
+				t.Fatalf("published slots = %d, want CNS capacity %d", got, capacity)
+			}
+		})
+	}
+}
+
 func TestIsCNSClaim(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -1262,5 +1279,8 @@ func TestUpdateCNSResourceSlicesForClaim(t *testing.T) {
 	subnet := devices[0].Attributes[cnsAttrSubnet].StringValue
 	if subnet == nil || *subnet != "new-guid" {
 		t.Fatalf("prepare-time published subnet attribute = %v, want GUID %q", subnet, "new-guid")
+	}
+	if slots := devices[0].Capacity[cnsCapSlots].Value.Value(); slots != 0 {
+		t.Fatalf("prepare-time published slots = %d, want authoritative CNS capacity 0", slots)
 	}
 }

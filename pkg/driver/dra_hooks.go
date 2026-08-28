@@ -400,11 +400,8 @@ func (np *NetworkDriver) buildCNSDevices(nic *cnsclient.NICResource) []resourcea
 		attrs[cnsAttrNetworkID] = resourceapi.DeviceAttribute{StringValue: &networkID}
 	}
 
-	// Capacity defaults to 1 (pristine/placeholder); CNS sets blockSize when NICNC exists
-	slots := int64(1)
-	if nic.Capacity > 0 {
-		slots = int64(nic.Capacity)
-	}
+	// CNS capacity is authoritative, including zero when the NIC is not schedulable.
+	slots := int64(nic.Capacity)
 	allowMulti := true
 	defaultQty := resource.MustParse("1")
 	minQty := resource.MustParse("1")
