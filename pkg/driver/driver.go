@@ -319,8 +319,9 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 		klog.Fatalf("Network Device DB failed for %d times to be restarted", maxAttempts)
 	}()
 
-	// publish available resources
-	go plugin.PublishResources(ctx)
+	// Prefix-on-NIC resources are published through the CNS plugin below. Keep the
+	// generic dra.net publisher disabled to avoid exposing a second set of devices.
+	// go plugin.PublishResources(ctx)
 
 	// Start a separate kubelet plugin for CNS resources if configured
 	if plugin.cnsClient != nil && plugin.cnsDriverName != "" {
