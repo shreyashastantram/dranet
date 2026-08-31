@@ -373,6 +373,7 @@ func logCNSNICChanges(prev, curr []cnsclient.NICResource) {
 //     networking.azure.com/networkID,
 //     networking.azure.com/mac, networking.azure.com/shared
 //   - capacity: networking.azure.com/slots with requestPolicy default=1, validRange min=1 max=1
+//     when the NIC has schedulable capacity
 func (np *NetworkDriver) buildCNSDevices(nic *cnsclient.NICResource) []resourceapi.Device {
 	deviceName := cnsNICDeviceName(nic)
 
@@ -403,9 +404,19 @@ func (np *NetworkDriver) buildCNSDevices(nic *cnsclient.NICResource) []resourcea
 	// CNS capacity is authoritative, including zero when the NIC is not schedulable.
 	slots := int64(nic.Capacity)
 	allowMulti := true
-	defaultQty := resource.MustParse("1")
-	minQty := resource.MustParse("1")
-	maxQty := resource.MustParse("1")
+	var requestPolicy *resourceapi.CapacityRequestPolicy
+	if slots > 0 {
+		defaultQty := resource.MustParse("1")
+		minQty := resource.MustParse("1")
+		maxQty := resource.MustParse("1")
+		requestPolicy = &resourceapi.CapacityRequestPolicy{
+			Default: &defaultQty,
+			ValidRange: &resourceapi.CapacityRequestPolicyRange{
+				Min: &minQty,
+				Max: &maxQty,
+			},
+		}
+	}
 
 	return []resourceapi.Device{
 		{
@@ -414,14 +425,8 @@ func (np *NetworkDriver) buildCNSDevices(nic *cnsclient.NICResource) []resourcea
 			Attributes:               attrs,
 			Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
 				cnsCapSlots: {
-					Value: *resource.NewQuantity(slots, resource.DecimalSI),
-					RequestPolicy: &resourceapi.CapacityRequestPolicy{
-						Default: &defaultQty,
-						ValidRange: &resourceapi.CapacityRequestPolicyRange{
-							Min: &minQty,
-							Max: &maxQty,
-						},
-					},
+					Value:         *resource.NewQuantity(slots, resource.DecimalSI),
+					RequestPolicy: requestPolicy,
 				},
 			},
 		},

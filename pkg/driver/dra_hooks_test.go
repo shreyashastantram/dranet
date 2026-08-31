@@ -1033,9 +1033,19 @@ func TestBuildCNSDevicesPublishesAllCapacities(t *testing.T) {
 				Capacity:   capacity,
 			})
 
-			slots := devices[0].Capacity[cnsCapSlots].Value
+			capacitySpec := devices[0].Capacity[cnsCapSlots]
+			slots := capacitySpec.Value
 			if got := slots.Value(); got != int64(capacity) {
 				t.Fatalf("published slots = %d, want CNS capacity %d", got, capacity)
+			}
+			if capacity == 0 {
+				if capacitySpec.RequestPolicy != nil {
+					t.Fatalf("zero capacity request policy = %+v, want nil", capacitySpec.RequestPolicy)
+				}
+				return
+			}
+			if capacitySpec.RequestPolicy == nil {
+				t.Fatal("positive capacity request policy is nil")
 			}
 		})
 	}
