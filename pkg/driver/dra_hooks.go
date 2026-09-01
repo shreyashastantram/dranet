@@ -59,7 +59,8 @@ const (
 	cnsAttrShared    = "networking.azure.com/shared"
 
 	// Consumable capacity key (KEP-5075)
-	cnsCapSlots = "networking.azure.com/slots"
+	cnsCapSlots        = "networking.azure.com/slots"
+	cnsTaintNoCapacity = "networking.azure.com/no-capacity"
 
 	// secondaryNICsPoolName is the ResourceSlice pool name used by the CNS
 	// publisher to expose all secondary NIC devices for a node under a
@@ -373,6 +374,8 @@ func logCNSNICChanges(prev, curr []cnsclient.NICResource) {
 //     networking.azure.com/networkID,
 //     networking.azure.com/mac, networking.azure.com/shared
 //   - capacity: networking.azure.com/slots with requestPolicy default=1, validRange min=1 max=1
+//     when the NIC has schedulable capacity
+//   - taint: networking.azure.com/no-capacity=true:NoSchedule when capacity is zero
 func (np *NetworkDriver) buildCNSDevices(nic *cnsclient.NICResource) []resourceapi.Device {
 	deviceName := cnsNICDeviceName(nic)
 
@@ -403,25 +406,37 @@ func (np *NetworkDriver) buildCNSDevices(nic *cnsclient.NICResource) []resourcea
 	// CNS capacity is authoritative, including zero when the NIC is not schedulable.
 	slots := int64(nic.Capacity)
 	allowMulti := true
-	defaultQty := resource.MustParse("1")
-	minQty := resource.MustParse("1")
-	maxQty := resource.MustParse("1")
+	var requestPolicy *resourceapi.CapacityRequestPolicy
+	var taints []resourceapi.DeviceTaint
+	if slots == 0 {
+		taints = []resourceapi.DeviceTaint{{
+			Key:    cnsTaintNoCapacity,
+			Value:  "true",
+			Effect: resourceapi.DeviceTaintEffectNoSchedule,
+		}}
+	} else {
+		defaultQty := resource.MustParse("1")
+		minQty := resource.MustParse("1")
+		maxQty := resource.MustParse("1")
+		requestPolicy = &resourceapi.CapacityRequestPolicy{
+			Default: &defaultQty,
+			ValidRange: &resourceapi.CapacityRequestPolicyRange{
+				Min: &minQty,
+				Max: &maxQty,
+			},
+		}
+	}
 
 	return []resourceapi.Device{
 		{
 			Name:                     deviceName,
 			AllowMultipleAllocations: &allowMulti,
 			Attributes:               attrs,
+			Taints:                   taints,
 			Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
 				cnsCapSlots: {
-					Value: *resource.NewQuantity(slots, resource.DecimalSI),
-					RequestPolicy: &resourceapi.CapacityRequestPolicy{
-						Default: &defaultQty,
-						ValidRange: &resourceapi.CapacityRequestPolicyRange{
-							Min: &minQty,
-							Max: &maxQty,
-						},
-					},
+					Value:         *resource.NewQuantity(slots, resource.DecimalSI),
+					RequestPolicy: requestPolicy,
 				},
 			},
 		},

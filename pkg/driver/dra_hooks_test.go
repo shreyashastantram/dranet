@@ -1033,9 +1033,30 @@ func TestBuildCNSDevicesPublishesAllCapacities(t *testing.T) {
 				Capacity:   capacity,
 			})
 
-			slots := devices[0].Capacity[cnsCapSlots].Value
+			capacitySpec := devices[0].Capacity[cnsCapSlots]
+			slots := capacitySpec.Value
 			if got := slots.Value(); got != int64(capacity) {
 				t.Fatalf("published slots = %d, want CNS capacity %d", got, capacity)
+			}
+			if capacity == 0 {
+				if capacitySpec.RequestPolicy != nil {
+					t.Fatalf("zero capacity request policy = %+v, want nil", capacitySpec.RequestPolicy)
+				}
+				wantTaints := []resourcev1.DeviceTaint{{
+					Key:    cnsTaintNoCapacity,
+					Value:  "true",
+					Effect: resourcev1.DeviceTaintEffectNoSchedule,
+				}}
+				if diff := cmp.Diff(wantTaints, devices[0].Taints); diff != "" {
+					t.Fatalf("zero capacity taints mismatch (-want +got):\n%s", diff)
+				}
+				return
+			}
+			if capacitySpec.RequestPolicy == nil {
+				t.Fatal("positive capacity request policy is nil")
+			}
+			if len(devices[0].Taints) != 0 {
+				t.Fatalf("positive capacity taints = %+v, want none", devices[0].Taints)
 			}
 		})
 	}
@@ -1280,7 +1301,8 @@ func TestUpdateCNSResourceSlicesForClaim(t *testing.T) {
 	if subnet == nil || *subnet != "new-guid" {
 		t.Fatalf("prepare-time published subnet attribute = %v, want GUID %q", subnet, "new-guid")
 	}
-	if slots := devices[0].Capacity[cnsCapSlots].Value.Value(); slots != 0 {
+	capacity := devices[0].Capacity[cnsCapSlots]
+	if slots := capacity.Value.Value(); slots != 0 {
 		t.Fatalf("prepare-time published slots = %d, want authoritative CNS capacity 0", slots)
 	}
 }
