@@ -49,9 +49,9 @@ func TestSecondaryNICPodConfigStore_SetAndGet(t *testing.T) {
 
 	store.Set(podUID, deviceName, cfg, types.NamespacedName{Namespace: "ns", Name: "claim"})
 
-	got := store.Get(podUID)
-	if got == nil {
-		t.Fatal("expected non-nil config, got nil")
+	got, found := store.Get(podUID)
+	if !found {
+		t.Fatal("expected config, got not found")
 	}
 	if len(got) != 1 {
 		t.Fatalf("expected 1 device config, got %d", len(got))
@@ -71,11 +71,11 @@ func TestSecondaryNICPodConfigStore_SetAndGet(t *testing.T) {
 	}
 }
 
-func TestSecondaryNICPodConfigStore_GetReturnsNilForUnknownPod(t *testing.T) {
+func TestSecondaryNICPodConfigStore_GetReportsUnknownPod(t *testing.T) {
 	store := NewSecondaryNICPodConfigStore()
-	got := store.Get(types.UID("nonexistent"))
-	if got != nil {
-		t.Errorf("expected nil for unknown pod, got %v", got)
+	got, found := store.Get(types.UID("nonexistent"))
+	if found || got != nil {
+		t.Errorf("Get() = (%v, %t), want (nil, false)", got, found)
 	}
 }
 
@@ -83,14 +83,20 @@ func TestSecondaryNICPodConfigStore_GetReturnsCopy(t *testing.T) {
 	store := NewSecondaryNICPodConfigStore()
 
 	podUID := types.UID("test-pod-uid")
-	store.Set(podUID, "eth1", SecondaryNICPodConfig{Mode: NICModeShared}, types.NamespacedName{Namespace: "ns", Name: "claim"})
+	if err := store.Set(podUID, "eth1", SecondaryNICPodConfig{Mode: NICModeShared}, types.NamespacedName{Namespace: "ns", Name: "claim"}); err != nil {
+		t.Fatal(err)
+	}
 
-	got := store.Get(podUID)
-	// Mutate the returned map
+	got, found := store.Get(podUID)
+	if !found {
+		t.Fatal("expected config, got not found")
+	}
 	got["mutated-device"] = SecondaryNICPodConfig{Mode: NICModeExclusive}
 
-	// Original store should not be affected
-	original := store.Get(podUID)
+	original, found := store.Get(podUID)
+	if !found {
+		t.Fatal("expected original config, got not found")
+	}
 	if len(original) != 1 {
 		t.Errorf("expected 1 device in original store, got %d", len(original))
 	}
@@ -99,7 +105,7 @@ func TestSecondaryNICPodConfigStore_GetReturnsCopy(t *testing.T) {
 	}
 }
 
-func TestSecondaryNICPodConfigStore_HasSharedPodForMAC(t *testing.T) {
+func TestSecondaryNICPodConfigStore_HasPodForMACByMode(t *testing.T) {
 	store := NewSecondaryNICPodConfigStore()
 	claim := types.NamespacedName{Namespace: "ns", Name: "claim"}
 	sharedPod := types.UID("shared-pod")
@@ -123,6 +129,15 @@ func TestSecondaryNICPodConfigStore_HasSharedPodForMAC(t *testing.T) {
 	if store.HasSharedPodForMAC("aa:bb:cc:dd:ee:03") {
 		t.Fatal("unexpected shared pod match for unknown MAC")
 	}
+	if !store.HasExclusivePodForMAC("AA-BB-CC-DD-EE-02") {
+		t.Fatal("expected exclusive pod match for normalized MAC")
+	}
+	if store.HasExclusivePodForMAC("aa:bb:cc:dd:ee:01") {
+		t.Fatal("shared pod must not count as an exclusive user")
+	}
+	if store.HasExclusivePodForMAC("aa:bb:cc:dd:ee:03") {
+		t.Fatal("unexpected exclusive pod match for unknown MAC")
+	}
 
 	store.Delete(sharedPod)
 	if store.HasSharedPodForMAC("aa:bb:cc:dd:ee:01") {
@@ -138,9 +153,9 @@ func TestSecondaryNICPodConfigStore_Delete(t *testing.T) {
 
 	store.Delete(podUID)
 
-	got := store.Get(podUID)
-	if got != nil {
-		t.Errorf("expected nil after delete, got %v", got)
+	got, found := store.Get(podUID)
+	if found || got != nil {
+		t.Errorf("Get() after delete = (%v, %t), want (nil, false)", got, found)
 	}
 }
 
@@ -151,7 +166,10 @@ func TestSecondaryNICPodConfigStore_MultipleDevices(t *testing.T) {
 	store.Set(podUID, "eth1", SecondaryNICPodConfig{Mode: NICModeShared}, types.NamespacedName{Namespace: "ns", Name: "claim"})
 	store.Set(podUID, "eth2", SecondaryNICPodConfig{Mode: NICModeExclusive}, types.NamespacedName{Namespace: "ns", Name: "claim"})
 
-	got := store.Get(podUID)
+	got, found := store.Get(podUID)
+	if !found {
+		t.Fatal("expected config, got not found")
+	}
 	if len(got) != 2 {
 		t.Fatalf("expected 2 device configs, got %d", len(got))
 	}
@@ -170,7 +188,10 @@ func TestSecondaryNICPodConfigStore_OverwriteDevice(t *testing.T) {
 	store.Set(podUID, "eth1", SecondaryNICPodConfig{Mode: NICModeShared}, types.NamespacedName{Namespace: "ns", Name: "claim"})
 	store.Set(podUID, "eth1", SecondaryNICPodConfig{Mode: NICModeExclusive}, types.NamespacedName{Namespace: "ns", Name: "claim"})
 
-	got := store.Get(podUID)
+	got, found := store.Get(podUID)
+	if !found {
+		t.Fatal("expected config, got not found")
+	}
 	if len(got) != 1 {
 		t.Fatalf("expected 1 device config after overwrite, got %d", len(got))
 	}
@@ -202,7 +223,10 @@ func TestSecondaryNICPodConfigStore_ExclusiveNICConfig(t *testing.T) {
 
 	store.Set(podUID, "eth1", cfg, types.NamespacedName{Namespace: "ns", Name: "claim"})
 
-	got := store.Get(podUID)
+	got, found := store.Get(podUID)
+	if !found {
+		t.Fatal("expected config, got not found")
+	}
 	gotCfg := got["eth1"]
 	if gotCfg.Mode != NICModeExclusive {
 		t.Errorf("expected mode exclusive, got %s", gotCfg.Mode)
@@ -226,10 +250,10 @@ func TestSecondaryNICPodConfigStore_DeletePreservesOtherPods(t *testing.T) {
 	if err := store.Delete(podA); err != nil {
 		t.Fatalf("Delete() error: %v", err)
 	}
-	if store.Get(podA) != nil {
+	if _, found := store.Get(podA); found {
 		t.Fatal("deleted pod still exists")
 	}
-	if store.Get(podB) == nil {
+	if _, found := store.Get(podB); !found {
 		t.Fatal("deleting pod A removed pod B")
 	}
 }
@@ -249,10 +273,12 @@ func TestSecondaryNICPodConfigStore_DeleteByClaim(t *testing.T) {
 		t.Fatalf("DeleteByClaim() error: %v", err)
 	}
 
-	if store.Get(podA) != nil || store.Get(podB) != nil {
+	_, foundA := store.Get(podA)
+	_, foundB := store.Get(podB)
+	if foundA || foundB {
 		t.Error("expected both pods removed from store after DeleteByClaim")
 	}
-	if store.Get(podC) == nil {
+	if _, found := store.Get(podC); !found {
 		t.Error("DeleteByClaim removed a pod belonging to another claim")
 	}
 	if err := store.DeleteByClaim(types.NamespacedName{Namespace: "ns", Name: "unknown"}); err != nil {
@@ -276,8 +302,8 @@ func TestSecondaryNICPodConfigStore_OverwriteUpdatesClaim(t *testing.T) {
 		t.Fatalf("DeleteByClaim(claimA) error: %v", err)
 	}
 
-	configs := store.Get(podUID)
-	if configs == nil {
+	configs, found := store.Get(podUID)
+	if !found {
 		t.Fatal("old claim deletion removed overwritten config")
 	}
 	if got := configs["eth1"].Claim; got != claimB {

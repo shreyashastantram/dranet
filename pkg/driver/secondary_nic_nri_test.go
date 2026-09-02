@@ -134,6 +134,29 @@ func TestRunPodSandboxSecondaryNIC_ExclusiveRejectsSharedPodOnSameNIC(t *testing
 	}
 }
 
+func TestRunPodSandboxSecondaryNIC_SharedRejectsExclusivePodOnSameNIC(t *testing.T) {
+	store := NewSecondaryNICPodConfigStore()
+	claim := types.NamespacedName{Namespace: "ns", Name: "claim"}
+	if err := store.Set("exclusive-pod", "device-a", SecondaryNICPodConfig{
+		Mode: NICModeExclusive,
+		NIC:  NICConfig{MAC: "aa:bb:cc:dd:ee:01"},
+	}, claim); err != nil {
+		t.Fatal(err)
+	}
+
+	np := &NetworkDriver{secondaryNICStore: store}
+	pod := testSecondaryNICPod("/run/netns/shared-pod")
+	err := np.runPodSandboxSecondaryNICs(context.Background(), pod, map[string]SecondaryNICPodConfig{
+		"device-b": {
+			Mode: NICModeShared,
+			NIC:  NICConfig{MAC: "AA-BB-CC-DD-EE-01"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "an exclusive pod still uses this NIC") {
+		t.Fatalf("runPodSandboxSecondaryNICs() error = %v, want exclusive-use rejection", err)
+	}
+}
+
 func TestRunPodSandboxSecondaryNIC_RejectsEmptyMAC(t *testing.T) {
 	tests := []struct {
 		name string
@@ -405,7 +428,7 @@ func TestStopPodSandbox_DispatchesSecondaryNICCleanup(t *testing.T) {
 		t.Fatalf("StopPodSandbox returned error: %v", err)
 	}
 	// Entry is intentionally retained here; removed on claim unprepare.
-	if np.secondaryNICStore.Get(podUID) == nil {
+	if _, found := np.secondaryNICStore.Get(podUID); !found {
 		t.Fatal("exclusive NIC store entry should be retained after StopPodSandbox")
 	}
 }

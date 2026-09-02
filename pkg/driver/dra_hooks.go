@@ -596,6 +596,19 @@ func (np *NetworkDriver) prepareCNSResourceClaim(ctx context.Context, claim *res
 		}
 	}
 
+	secondaryNICCount := 0
+	for _, result := range claim.Status.Allocation.Devices.Results {
+		if result.Driver == np.cnsDriverName {
+			secondaryNICCount++
+		}
+	}
+	if secondaryNICCount != 1 {
+		return kubeletplugin.PrepareResult{
+			Err: fmt.Errorf("CNS claim %s/%s has %d secondary NIC devices; exactly one is supported",
+				claim.Namespace, claim.Name, secondaryNICCount),
+		}
+	}
+
 	var errorList []error
 	goalStateByClaim := map[types.UID]claimGoalState{}
 

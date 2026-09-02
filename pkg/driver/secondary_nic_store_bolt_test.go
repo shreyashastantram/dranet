@@ -91,17 +91,25 @@ func TestSecondaryNICPodConfigStore_Persistence(t *testing.T) {
 	}
 	defer store2.Close()
 
-	got := store2.Get("pod-1")["device-1"]
+	pod1Configs, found := store2.Get("pod-1")
+	if !found {
+		t.Fatal("restored pod-1 config not found")
+	}
+	got := pod1Configs["device-1"]
 	config.Claim = claim
 	if diff := cmp.Diff(config, got); diff != "" {
 		t.Fatalf("restored config mismatch (-want +got):\n%s", diff)
 	}
 	secondDeviceConfig.Claim = claim
-	if diff := cmp.Diff(secondDeviceConfig, store2.Get("pod-1")["device-2"]); diff != "" {
+	if diff := cmp.Diff(secondDeviceConfig, pod1Configs["device-2"]); diff != "" {
 		t.Fatalf("restored second device mismatch (-want +got):\n%s", diff)
 	}
 	exclusiveConfig.Claim = claim
-	if diff := cmp.Diff(exclusiveConfig, store2.Get("pod-2")["device-2"]); diff != "" {
+	pod2Configs, found := store2.Get("pod-2")
+	if !found {
+		t.Fatal("restored pod-2 config not found")
+	}
+	if diff := cmp.Diff(exclusiveConfig, pod2Configs["device-2"]); diff != "" {
 		t.Fatalf("restored exclusive config mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -196,13 +204,13 @@ func TestSecondaryNICPodConfigStore_DeleteByClaimPersists(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	if store.Get("pod-a") != nil {
+	if _, found := store.Get("pod-a"); found {
 		t.Fatal("claim A pod reappeared after reopen")
 	}
-	if store.Get("pod-a-2") != nil {
+	if _, found := store.Get("pod-a-2"); found {
 		t.Fatal("second claim A pod reappeared after reopen")
 	}
-	if store.Get("pod-b") == nil {
+	if _, found := store.Get("pod-b"); !found {
 		t.Fatal("claim B pod was deleted")
 	}
 }
@@ -240,10 +248,10 @@ func TestSecondaryNICPodConfigStore_DeletePersists(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	if store.Get("pod-a") != nil {
+	if _, found := store.Get("pod-a"); found {
 		t.Fatal("deleted pod reappeared after reopen")
 	}
-	if store.Get("pod-b") == nil {
+	if _, found := store.Get("pod-b"); !found {
 		t.Fatal("Delete removed an unrelated pod")
 	}
 }
@@ -282,7 +290,11 @@ func TestSecondaryNICPodConfigStore_OverwriteClaimPersists(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	got := store.Get("pod-a")["device"]
+	configs, found := store.Get("pod-a")
+	if !found {
+		t.Fatal("restored pod-a config not found")
+	}
+	got := configs["device"]
 	if got.Mode != NICModeExclusive || got.Claim != claimB {
 		t.Fatalf("restored config = %+v, want exclusive config owned by %v", got, claimB)
 	}
@@ -371,7 +383,12 @@ func TestSecondaryNICPodConfigStore_ThreadSafetyWithBolt(t *testing.T) {
 				t.Errorf("Set(%s) error: %v", podUID, err)
 				return
 			}
-			if got := store.Get(podUID)[device]; got.NIC.MAC != config.NIC.MAC {
+			configs, found := store.Get(podUID)
+			if !found {
+				t.Errorf("Get(%s) config not found", podUID)
+				return
+			}
+			if got := configs[device]; got.NIC.MAC != config.NIC.MAC {
 				t.Errorf("Get(%s) MAC = %q, want %q", podUID, got.NIC.MAC, config.NIC.MAC)
 			}
 		}(index)
@@ -442,7 +459,7 @@ func TestSecondaryNICPodConfigStore_WriteFailureDoesNotUpdateMemory(t *testing.T
 	if err := store.Set("pod-1", "device", SecondaryNICPodConfig{}, types.NamespacedName{Name: "claim"}); !errors.Is(err, wantErr) {
 		t.Fatalf("Set() error = %v, want %v", err, wantErr)
 	}
-	if store.Get("pod-1") != nil {
+	if _, found := store.Get("pod-1"); found {
 		t.Fatal("failed write updated memory")
 	}
 }
@@ -468,7 +485,7 @@ func TestSecondaryNICPodConfigStore_DirectDeleteFailureRetainsMemory(t *testing.
 	if err := store.Delete("pod-1"); !errors.Is(err, wantErr) {
 		t.Fatalf("Delete() error = %v, want %v", err, wantErr)
 	}
-	if store.Get("pod-1") == nil {
+	if _, found := store.Get("pod-1"); !found {
 		t.Fatal("failed direct delete removed memory state")
 	}
 }
@@ -488,7 +505,7 @@ func TestSecondaryNICPodConfigStore_DeleteFailureRetainsMemory(t *testing.T) {
 	if err := store.DeleteByClaim(types.NamespacedName{Name: "claim"}); !errors.Is(err, wantErr) {
 		t.Fatalf("DeleteByClaim() error = %v, want %v", err, wantErr)
 	}
-	if store.Get("pod-1") == nil {
+	if _, found := store.Get("pod-1"); !found {
 		t.Fatal("failed delete removed memory state")
 	}
 }

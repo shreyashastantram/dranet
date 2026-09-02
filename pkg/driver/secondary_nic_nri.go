@@ -74,6 +74,10 @@ func (np *NetworkDriver) runPodSandboxSecondaryNICs(_ context.Context, pod *api.
 			if cfg.NIC.MAC == "" {
 				return fmt.Errorf("secondary NIC RunPodSandbox: device %s has shared mode but empty MAC", deviceName)
 			}
+			if np.secondaryNICStore != nil && np.secondaryNICStore.HasExclusivePodForMAC(cfg.NIC.MAC) {
+				return fmt.Errorf("secondary NIC RunPodSandbox: cannot attach shared device %s (MAC %s): an exclusive pod still uses this NIC",
+					deviceName, cfg.NIC.MAC)
+			}
 			klog.V(2).Infof("secondary NIC RunPodSandbox: attaching shared IPVLAN L3 via host VRF for device %s (MAC %s, pod IP %s) on pod %s/%s",
 				deviceName, cfg.NIC.MAC, cfg.NIC.PodIP, pod.Namespace, pod.Name)
 

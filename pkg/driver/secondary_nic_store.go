@@ -148,6 +148,8 @@ func (s *SecondaryNICPodConfigStore) Close() error {
 
 // Set stores the configuration for a specific device under a given pod UID.
 // If a configuration for the pod UID or device name already exists, it will be overwritten.
+// Set is transactional for one device and relies on callers allowing only one
+// secondary NIC per pod. Multi-NIC support requires a pod-level batch transaction.
 // The claim is stored in the authoritative config so claim cleanup can scan the
 // store without maintaining a separate reverse index.
 func (s *SecondaryNICPodConfigStore) Set(podUID types.UID, device string, cfg SecondaryNICPodConfig, claimKey types.NamespacedName) error {
@@ -168,26 +170,35 @@ func (s *SecondaryNICPodConfigStore) Set(podUID types.UID, device string, cfg Se
 }
 
 // Get retrieves all device configurations for a given pod UID.
-// Returns nil if the pod does not use a secondary NIC (no entry exists).
 // Returns a copy of the map to prevent external modification of internal state.
-func (s *SecondaryNICPodConfigStore) Get(podUID types.UID) map[string]SecondaryNICPodConfig {
+func (s *SecondaryNICPodConfigStore) Get(podUID types.UID) (map[string]SecondaryNICPodConfig, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	configs, found := s.store[podUID]
 	if !found {
-		return nil
+		return nil, false
 	}
 	// Return a copy to prevent external modification of the internal map
 	configsCopy := make(map[string]SecondaryNICPodConfig, len(configs))
 	for k, v := range configs {
 		configsCopy[k] = v
 	}
-	return configsCopy
+	return configsCopy, true
 }
 
 // HasSharedPodForMAC reports whether any stored pod uses the physical NIC as a
 // shared IPVLAN parent.
 func (s *SecondaryNICPodConfigStore) HasSharedPodForMAC(mac string) bool {
+	return s.hasPodForMACAndMode(mac, NICModeShared)
+}
+
+// HasExclusivePodForMAC reports whether any stored pod uses the physical NIC
+// exclusively.
+func (s *SecondaryNICPodConfigStore) HasExclusivePodForMAC(mac string) bool {
+	return s.hasPodForMACAndMode(mac, NICModeExclusive)
+}
+
+func (s *SecondaryNICPodConfigStore) hasPodForMACAndMode(mac string, mode NICMode) bool {
 	targetMAC := normalizedMACKey(mac)
 
 	s.mu.RLock()
@@ -195,7 +206,7 @@ func (s *SecondaryNICPodConfigStore) HasSharedPodForMAC(mac string) bool {
 
 	for _, configs := range s.store {
 		for _, cfg := range configs {
-			if cfg.Mode == NICModeShared && normalizedMACKey(cfg.NIC.MAC) == targetMAC {
+			if cfg.Mode == mode && normalizedMACKey(cfg.NIC.MAC) == targetMAC {
 				return true
 			}
 		}

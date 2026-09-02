@@ -219,6 +219,9 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 	if plugin.secondaryNICDBPath != "" {
 		secondaryNICCheckpointer, err = newSecondaryNICBoltCheckpointer(plugin.secondaryNICDBPath)
 		if err != nil {
+			if secondaryNICCheckpointer != nil {
+				secondaryNICCheckpointer.Close()
+			}
 			plugin.podConfigStore.Close()
 			return nil, fmt.Errorf("failed to open secondary NIC config database at %s: %v", plugin.secondaryNICDBPath, err)
 		}

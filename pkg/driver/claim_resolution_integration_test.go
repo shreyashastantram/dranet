@@ -138,8 +138,8 @@ func TestIntegration_PrepareCNSResourceClaim_FastPath(t *testing.T) {
 			}
 
 			// Fast path SHOULD populate secondaryNICStore
-			secondaryNICConfigs := np.secondaryNICStore.Get(types.UID("pod-uid-1"))
-			if secondaryNICConfigs == nil {
+			secondaryNICConfigs, found := np.secondaryNICStore.Get(types.UID("pod-uid-1"))
+			if !found {
 				t.Fatal("expected secondary NIC store entry")
 			}
 			secondaryNICConfig, ok := secondaryNICConfigs[deviceName]

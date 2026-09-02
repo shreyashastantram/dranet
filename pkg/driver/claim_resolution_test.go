@@ -106,8 +106,8 @@ func TestPopulateSecondaryNICStoreForDevice(t *testing.T) {
 		t.Fatalf("populateSecondaryNICStoreForDevice() failed: %v", err)
 	}
 
-	got := np.secondaryNICStore.Get(pod.UID)
-	if got == nil {
+	got, found := np.secondaryNICStore.Get(pod.UID)
+	if !found {
 		t.Fatal("expected secondary NIC store entry")
 	}
 	if got[deviceName].Mode != NICModeShared {
@@ -127,7 +127,7 @@ func TestPopulateSecondaryNICStoreForDevice(t *testing.T) {
 	if !errors.Is(err, writeErr) {
 		t.Fatalf("populate error = %v, want checkpoint error %v", err, writeErr)
 	}
-	if np.secondaryNICStore.Get(pod.UID) != nil {
+	if _, found := np.secondaryNICStore.Get(pod.UID); found {
 		t.Fatal("failed persistent write populated secondary NIC memory store")
 	}
 }

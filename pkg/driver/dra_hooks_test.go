@@ -274,7 +274,7 @@ func TestUnprepareResourceClaim_SecondaryNICDeleteFailure(t *testing.T) {
 	if !errors.Is(err, deleteErr) {
 		t.Fatalf("unprepare error = %v, want %v", err, deleteErr)
 	}
-	if secondaryStore.Get("pod-1") == nil {
+	if _, found := secondaryStore.Get("pod-1"); !found {
 		t.Fatal("failed unprepare removed secondary NIC memory state")
 	}
 }
@@ -1152,8 +1152,59 @@ func TestPrepareResourceClaims_CNSFastPathRejectsMultiplePodConsumers(t *testing
 	if result[claim.UID].Err == nil || !strings.Contains(result[claim.UID].Err.Error(), "has 2 pod consumers; only one is supported") {
 		t.Fatalf("claim error = %v, want multiple-consumer rejection", result[claim.UID].Err)
 	}
-	if np.secondaryNICStore.Get(types.UID("pod-uid-a")) != nil || np.secondaryNICStore.Get(types.UID("pod-uid-b")) != nil {
+	_, foundA := np.secondaryNICStore.Get(types.UID("pod-uid-a"))
+	_, foundB := np.secondaryNICStore.Get(types.UID("pod-uid-b"))
+	if foundA || foundB {
 		t.Fatal("secondary NIC store was populated for rejected multi-consumer claim")
+	}
+}
+
+func TestPrepareResourceClaims_CNSFastPathRejectsMultipleSecondaryNICsBeforeWrite(t *testing.T) {
+	draPluginRequestsTotal.Reset()
+	cnsCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		cnsCalled = true
+	}))
+	defer server.Close()
+
+	client, err := cnsclient.New(server.URL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewSecondaryNICPodConfigStore()
+	np := &NetworkDriver{
+		driverName:        "dra.net",
+		cnsDriverName:     "networking.azure.com",
+		cnsClient:         client,
+		secondaryNICStore: store,
+	}
+	claim := &resourcev1.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "cns-claim", Namespace: "default", UID: types.UID("cns-claim-uid")},
+		Status: resourcev1.ResourceClaimStatus{
+			ReservedFor: []resourcev1.ResourceClaimConsumerReference{
+				{Resource: "pods", Name: "pod-a", UID: "pod-uid-a"},
+			},
+			Allocation: &resourcev1.AllocationResult{Devices: resourcev1.DeviceAllocationResult{
+				Results: []resourcev1.DeviceRequestAllocationResult{
+					{Driver: "networking.azure.com", Device: "device-a", Request: "nic-a"},
+					{Driver: "networking.azure.com", Device: "device-b", Request: "nic-b"},
+				},
+			}},
+		},
+	}
+
+	result, err := np.PrepareResourceClaims(context.Background(), []*resourcev1.ResourceClaim{claim})
+	if err != nil {
+		t.Fatalf("PrepareResourceClaims failed: %v", err)
+	}
+	if result[claim.UID].Err == nil || !strings.Contains(result[claim.UID].Err.Error(), "has 2 secondary NIC devices; exactly one is supported") {
+		t.Fatalf("claim error = %v, want multiple-secondary-NIC rejection", result[claim.UID].Err)
+	}
+	if cnsCalled {
+		t.Fatal("CNS was called for rejected multi-secondary-NIC claim")
+	}
+	if _, found := store.Get("pod-uid-a"); found {
+		t.Fatal("secondary NIC store was populated for rejected multi-secondary-NIC claim")
 	}
 }
 
