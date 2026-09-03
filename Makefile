@@ -40,6 +40,14 @@ e2e-test:
 lint:
 	hack/lint.sh
 
+# Run website development server
+.PHONY: serve-site
+serve-site:
+	hack/serve-site.sh
+
+helm-lint:
+	helm lint --strict deployments/helm/dranet
+
 update:
 	go mod tidy
 
@@ -47,28 +55,56 @@ update:
 ensure-buildx:
 	./hack/init-buildx.sh
 
-# get image name from directory we're building
+HELM_VERSION_SHA?=a2369ca71c0ef633bf6e4fccd66d634eb379b371 # v3.20.1
+.PHONY: ensure-helm
+ensure-helm:
+	@if ! helm version >/dev/null 2>&1; then \
+		echo "Helm not found, installing helm@$(HELM_VERSION_SHA) ..."; \
+		go install helm.sh/helm/v3/cmd/helm@$(HELM_VERSION_SHA); \
+	fi
+
 IMAGE_NAME=dranet
-# docker image registry, default to upstream
 REGISTRY?=gcr.io/k8s-staging-networking
-# tag based on date-sha
-TAG?=$(shell echo "$$(date +v%Y%m%d)-$$(git describe --always --dirty)")
-# the full image tag
+TAG?=$(shell git describe --tags --always --dirty)
+CHART_VERSION?=$(shell echo "$(TAG)" | sed 's/^v//')
+
 IMAGE?=$(REGISTRY)/$(IMAGE_NAME):$(TAG)
+
+CHART_REGISTRY?=$(REGISTRY)/charts
 PLATFORMS?=linux/amd64,linux/arm64
+
+# base images (defaults are in the Dockerfile)
+BUILD_ARGS?=
+ifdef GOLANG_IMAGE
+BUILD_ARGS+=--build-arg GOLANG_IMAGE=$(GOLANG_IMAGE)
+endif
+ifdef BASE_IMAGE
+BUILD_ARGS+=--build-arg BASE_IMAGE=$(BASE_IMAGE)
+endif
 
 # required to enable buildx
 export DOCKER_CLI_EXPERIMENTAL=enabled
 image-build: ensure-buildx
 	docker buildx build . \
+		$(BUILD_ARGS) \
 		--tag="${IMAGE}" \
 		--load
 
 image-push: ensure-buildx
 	docker buildx build . \
 		--platform=$(PLATFORMS) \
+		$(BUILD_ARGS) \
 		--tag="${IMAGE}" \
 		--push
+
+helm-package: ensure-helm
+	helm package deployments/helm/dranet \
+		--version "$(CHART_VERSION)" \
+		--app-version "$(TAG)" \
+		--destination $(OUT_DIR)
+
+helm-push: helm-package
+	helm push $(OUT_DIR)/dranet-$(CHART_VERSION).tgz oci://$(CHART_REGISTRY)
 
 kind-cluster:
 	kind create cluster --name dra --config kind.yaml
@@ -79,5 +115,7 @@ kind-image: image-build
 	kubectl delete -f install.yaml || true
 	kubectl apply -f install.yaml
 
-# The main release target, which pushes all images
-release: image-push
+# The main release target, which pushes all images and helm charts.
+release: image-push helm-push
+
+

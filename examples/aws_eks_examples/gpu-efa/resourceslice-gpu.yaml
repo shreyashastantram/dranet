@@ -1,0 +1,239 @@
+apiVersion: v1
+items:
+- apiVersion: resource.k8s.io/v1
+  kind: ResourceSlice
+  metadata:
+    generateName: ip-192-168-153-160.ec2.internal-gpu.nvidia.com-
+    name: ip-192-168-153-160.ec2.internal-gpu.nvidia.com-xz4s4
+    ownerReferences:
+    - apiVersion: v1
+      controller: true
+      kind: Node
+      name: ip-192-168-153-160.ec2.internal
+  spec:
+    devices:
+    - attributes:
+        addressingMode:
+          string: HMM
+        architecture:
+          string: Ampere
+        brand:
+          string: Nvidia
+        cudaComputeCapability:
+          version: 8.0.0
+        cudaDriverVersion:
+          version: 13.0.0
+        driverVersion:
+          version: 580.126.9
+        productName:
+          string: NVIDIA A100-SXM4-40GB
+        resource.kubernetes.io/pciBusID:
+          string: '0000:10:1c.0'
+        resource.kubernetes.io/pcieRoot:
+          string: pci0000:10
+        type:
+          string: gpu
+        uuid:
+          string: GPU-8a10b6f7-077c-d51f-48f0-eba64feb5e9f
+      capacity:
+        memory:
+          value: 40Gi
+      name: gpu-0
+    - attributes:
+        addressingMode:
+          string: HMM
+        architecture:
+          string: Ampere
+        brand:
+          string: Nvidia
+        cudaComputeCapability:
+          version: 8.0.0
+        cudaDriverVersion:
+          version: 13.0.0
+        driverVersion:
+          version: 580.126.9
+        productName:
+          string: NVIDIA A100-SXM4-40GB
+        resource.kubernetes.io/pciBusID:
+          string: '0000:10:1d.0'
+        resource.kubernetes.io/pcieRoot:
+          string: pci0000:10
+        type:
+          string: gpu
+        uuid:
+          string: GPU-a498ba79-aa87-d951-24e9-fae585d4eb6c
+      capacity:
+        memory:
+          value: 40Gi
+      name: gpu-1
+    - attributes:
+        addressingMode:
+          string: HMM
+        architecture:
+          string: Ampere
+        brand:
+          string: Nvidia
+        cudaComputeCapability:
+          version: 8.0.0
+        cudaDriverVersion:
+          version: 13.0.0
+        driverVersion:
+          version: 580.126.9
+        productName:
+          string: NVIDIA A100-SXM4-40GB
+        resource.kubernetes.io/pciBusID:
+          string: '0000:20:1c.0'
+        resource.kubernetes.io/pcieRoot:
+          string: pci0000:20
+        type:
+          string: gpu
+        uuid:
+          string: GPU-f3aac87a-a8f2-dd37-c30c-4f299fe25b48
+      capacity:
+        memory:
+          value: 40Gi
+      name: gpu-2
+    - attributes:
+        addressingMode:
+          string: HMM
+        architecture:
+          string: Ampere
+        brand:
+          string: Nvidia
+        cudaComputeCapability:
+          version: 8.0.0
+        cudaDriverVersion:
+          version: 13.0.0
+        driverVersion:
+          version: 580.126.9
+        productName:
+          string: NVIDIA A100-SXM4-40GB
+        resource.kubernetes.io/pciBusID:
+          string: '0000:20:1d.0'
+        resource.kubernetes.io/pcieRoot:
+          string: pci0000:20
+        type:
+          string: gpu
+        uuid:
+          string: GPU-55d5f6e7-e985-54f9-c142-71e22fe042f3
+      capacity:
+        memory:
+          value: 40Gi
+      name: gpu-3
+    - attributes:
+        addressingMode:
+          string: HMM
+        architecture:
+          string: Ampere
+        brand:
+          string: Nvidia
+        cudaComputeCapability:
+          version: 8.0.0
+        cudaDriverVersion:
+          version: 13.0.0
+        driverVersion:
+          version: 580.126.9
+        productName:
+          string: NVIDIA A100-SXM4-40GB
+        resource.kubernetes.io/pciBusID:
+          string: '0000:90:1c.0'
+        resource.kubernetes.io/pcieRoot:
+          string: pci0000:90
+        type:
+          string: gpu
+        uuid:
+          string: GPU-bea92d99-f944-a6b8-42d8-bbf035386a98
+      capacity:
+        memory:
+          value: 40Gi
+      name: gpu-4
+    - attributes:
+        addressingMode:
+          string: HMM
+        architecture:
+          string: Ampere
+        brand:
+          string: Nvidia
+        cudaComputeCapability:
+          version: 8.0.0
+        cudaDriverVersion:
+          version: 13.0.0
+        driverVersion:
+          version: 580.126.9
+        productName:
+          string: NVIDIA A100-SXM4-40GB
+        resource.kubernetes.io/pciBusID:
+          string: '0000:90:1d.0'
+        resource.kubernetes.io/pcieRoot:
+          string: pci0000:90
+        type:
+          string: gpu
+        uuid:
+          string: GPU-4a6c805f-f918-bd23-bcde-71e7cddcf75b
+      capacity:
+        memory:
+          value: 40Gi
+      name: gpu-5
+    - attributes:
+        addressingMode:
+          string: HMM
+        architecture:
+          string: Ampere
+        brand:
+          string: Nvidia
+        cudaComputeCapability:
+          version: 8.0.0
+        cudaDriverVersion:
+          version: 13.0.0
+        driverVersion:
+          version: 580.126.9
+        productName:
+          string: NVIDIA A100-SXM4-40GB
+        resource.kubernetes.io/pciBusID:
+          string: '0000:a0:1c.0'
+        resource.kubernetes.io/pcieRoot:
+          string: pci0000:a0
+        type:
+          string: gpu
+        uuid:
+          string: GPU-b1b289f2-00c9-116c-cd34-c4f99e316a22
+      capacity:
+        memory:
+          value: 40Gi
+      name: gpu-6
+    - attributes:
+        addressingMode:
+          string: HMM
+        architecture:
+          string: Ampere
+        brand:
+          string: Nvidia
+        cudaComputeCapability:
+          version: 8.0.0
+        cudaDriverVersion:
+          version: 13.0.0
+        driverVersion:
+          version: 580.126.9
+        productName:
+          string: NVIDIA A100-SXM4-40GB
+        resource.kubernetes.io/pciBusID:
+          string: '0000:a0:1d.0'
+        resource.kubernetes.io/pcieRoot:
+          string: pci0000:a0
+        type:
+          string: gpu
+        uuid:
+          string: GPU-65978bba-bde7-3884-01ab-9a27152d2f43
+      capacity:
+        memory:
+          value: 40Gi
+      name: gpu-7
+    driver: gpu.nvidia.com
+    nodeName: ip-192-168-153-160.ec2.internal
+    pool:
+      generation: 1
+      name: ip-192-168-153-160.ec2.internal
+      resourceSliceCount: 1
+kind: List
+metadata:
+  resourceVersion: ''

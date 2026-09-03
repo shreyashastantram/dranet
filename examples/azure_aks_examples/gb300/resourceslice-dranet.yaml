@@ -1,0 +1,99 @@
+apiVersion: resource.k8s.io/v1
+kind: ResourceSlice
+metadata:
+  generateName: aks-gpu-45139532-vmss000081-dra.net-
+  name: aks-gpu-45139532-vmss000081-dra.net-tkqk6
+  ownerReferences:
+  - apiVersion: v1
+    controller: true
+    kind: Node
+    name: aks-gpu-45139532-vmss000081
+    uid: 00c21858-73a7-402e-88bc-5e33b1d39bb7
+  uid: b266385d-100c-417d-bbbb-6da7bf4edbfd
+spec:
+  devices:
+  - attributes:
+      azure.dra.net/placementGroupId:
+        string: c6c749e8-a38b-470e-8c94-2a7d00001bf0
+      azure.dra.net/vmSize:
+        string: Standard_ND128isr_GB300_v6
+      dra.net/numaNode:
+        int: 0
+      dra.net/pciAddress:
+        string: "0101:00:00.0"
+      dra.net/pciDevice:
+        string: ConnectX Family mlx5Gen Virtual Function
+      dra.net/pciSubsystem:
+        string: "0240"
+      dra.net/pciVendor:
+        string: Mellanox Technologies
+      dra.net/rdma:
+        bool: true
+      dra.net/rdmaDevice:
+        string: mlx5_0
+    name: pci-0101-00-00-0
+  - attributes:
+      azure.dra.net/placementGroupId:
+        string: c6c749e8-a38b-470e-8c94-2a7d00001bf0
+      azure.dra.net/vmSize:
+        string: Standard_ND128isr_GB300_v6
+      dra.net/numaNode:
+        int: 0
+      dra.net/pciAddress:
+        string: "0102:00:00.0"
+      dra.net/pciDevice:
+        string: ConnectX Family mlx5Gen Virtual Function
+      dra.net/pciSubsystem:
+        string: "0240"
+      dra.net/pciVendor:
+        string: Mellanox Technologies
+      dra.net/rdma:
+        bool: true
+      dra.net/rdmaDevice:
+        string: mlx5_1
+    name: pci-0102-00-00-0
+  - attributes:
+      azure.dra.net/placementGroupId:
+        string: c6c749e8-a38b-470e-8c94-2a7d00001bf0
+      azure.dra.net/vmSize:
+        string: Standard_ND128isr_GB300_v6
+      dra.net/numaNode:
+        int: 1
+      dra.net/pciAddress:
+        string: "0103:00:00.0"
+      dra.net/pciDevice:
+        string: ConnectX Family mlx5Gen Virtual Function
+      dra.net/pciSubsystem:
+        string: "0240"
+      dra.net/pciVendor:
+        string: Mellanox Technologies
+      dra.net/rdma:
+        bool: true
+      dra.net/rdmaDevice:
+        string: mlx5_2
+    name: pci-0103-00-00-0
+  - attributes:
+      azure.dra.net/placementGroupId:
+        string: c6c749e8-a38b-470e-8c94-2a7d00001bf0
+      azure.dra.net/vmSize:
+        string: Standard_ND128isr_GB300_v6
+      dra.net/numaNode:
+        int: 1
+      dra.net/pciAddress:
+        string: "0104:00:00.0"
+      dra.net/pciDevice:
+        string: ConnectX Family mlx5Gen Virtual Function
+      dra.net/pciSubsystem:
+        string: "0240"
+      dra.net/pciVendor:
+        string: Mellanox Technologies
+      dra.net/rdma:
+        bool: true
+      dra.net/rdmaDevice:
+        string: mlx5_3
+    name: pci-0104-00-00-0
+  driver: dra.net
+  nodeName: aks-gpu-45139532-vmss000081
+  pool:
+    name: aks-gpu-45139532-vmss000081
+    resourceSliceCount: 1

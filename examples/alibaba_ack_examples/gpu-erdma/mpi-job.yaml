@@ -1,0 +1,72 @@
+apiVersion: kubeflow.org/v2beta1
+kind: MPIJob
+metadata:
+  name: nccl-test-erdma
+spec:
+  slotsPerWorker: 2
+  mpiReplicaSpecs:
+    Launcher:
+      replicas: 1
+      template:
+        spec:
+          containers:
+          - name: nccl
+            image: dsw-registry.cn-hangzhou.cr.aliyuncs.com/pai/nccl-tests:12.2.2-cudnn8-devel-ubuntu22.04-nccl2.19.3-1-85f9143
+            command: ["/bin/bash", "-c"]
+            args:
+            - |
+              sleep 10
+              mpirun -np 4 \
+                --allow-run-as-root \
+                -bind-to none \
+                --mca pml ob1 \
+                --mca btl tcp,self \
+                --mca btl_tcp_if_include eth0 \
+                --mca coll_hcoll_enable 0 \
+                --mca coll_ucc_enable 0 \
+                -x LD_LIBRARY_PATH \
+                -x NCCL_DEBUG=INFO \
+                -x NCCL_SOCKET_IFNAME=eth0 \
+                -x NCCL_IB_HCA=erdma \
+                -x NCCL_SHM_DISABLE=1 \
+                /opt/nccl_tests/build/all_reduce_perf -b 512M -e 8G -f 2 -g 1 -c 0
+    Worker:
+      replicas: 2
+      template:
+        spec:
+          affinity:
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector:
+                  matchLabels:
+                    training.kubeflow.org/job-name: nccl-test-erdma
+                    training.kubeflow.org/job-role: worker
+                topologyKey: kubernetes.io/hostname
+          automountServiceAccountToken: false
+          resourceClaims:
+          - name: erdma
+            resourceClaimTemplateName: erdma
+          containers:
+          - name: nccl
+            image: dsw-registry.cn-hangzhou.cr.aliyuncs.com/pai/nccl-tests:12.2.2-cudnn8-devel-ubuntu22.04-nccl2.19.3-1-85f9143
+            resources:
+              limits:
+                nvidia.com/gpu: "2"
+              claims:
+              - name: erdma
+            volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            securityContext:
+              capabilities:
+                add:
+                - IPC_LOCK
+          volumes:
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+          tolerations:
+          - key: "nvidia.com/gpu"
+            operator: "Exists"
+            effect: "NoSchedule"

@@ -108,7 +108,7 @@ func TestValidateConfig(t *testing.T) {
 			raw:         newRawExtension(t, invalidRouteConf),
 			expectErr:   true,
 			expectedCfg: &invalidRouteConf,
-			errContains: []string{"routes[0].destination: invalid IP or CIDR format 'invalid-cidr'"},
+			errContains: []string{"routes[0].destination: invalid CIDR format 'invalid-cidr' (host routes use /32 or /128)"},
 		},
 		{
 			name:        "config with rule validation error",
@@ -117,10 +117,27 @@ func TestValidateConfig(t *testing.T) {
 			expectedCfg: &invalidRuleConf,
 			errContains: []string{"rules[0].source: invalid CIDR format 'invalid-cidr'"},
 		},
+		{
+			name:        "config with VRF and empty name",
+			raw:         newRawExtension(t, NetworkConfig{Interface: InterfaceConfig{Name: "eth0", VRF: &VRFConfig{Name: ""}}}),
+			expectErr:   true,
+			expectedCfg: &NetworkConfig{Interface: InterfaceConfig{Name: "eth0", VRF: &VRFConfig{Name: ""}}},
+			errContains: []string{"interface.vrf.name: cannot be empty"},
+		},
+		{
+			name:        "config with VRF and rules validation error",
+			raw:         newRawExtension(t, NetworkConfig{Interface: InterfaceConfig{Name: "eth0", VRF: &VRFConfig{Name: "my-vrf"}}, Rules: []RuleConfig{{Table: 100}}}),
+			expectErr:   true,
+			expectedCfg: &NetworkConfig{Interface: InterfaceConfig{Name: "eth0", VRF: &VRFConfig{Name: "my-vrf"}}, Rules: []RuleConfig{{Table: 100}}},
+			errContains: []string{"rules are not supported when VRF is enabled"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.expectedCfg != nil {
+				tt.expectedCfg.Default()
+			}
 			cfg, errs := ValidateConfig(tt.raw)
 			hasErrs := len(errs) > 0
 
@@ -362,6 +379,26 @@ func TestValidateRoutes(t *testing.T) {
 			errCount:  1,
 		},
 		{
+			name:      "valid host route as /32",
+			routes:    []RouteConfig{{Destination: "192.168.1.1/32", Gateway: "192.168.1.254", Scope: scopeUniverse}},
+			fieldPath: "routes",
+			expectErr: false,
+		},
+		{
+			name:      "bare IPv4 destination rejected",
+			routes:    []RouteConfig{{Destination: "192.168.1.1", Gateway: "192.168.1.254"}},
+			fieldPath: "routes",
+			expectErr: true,
+			errCount:  1,
+		},
+		{
+			name:      "bare IPv6 destination rejected",
+			routes:    []RouteConfig{{Destination: "2001:db8::1", Scope: scopeLink}},
+			fieldPath: "routes",
+			expectErr: true,
+			errCount:  1,
+		},
+		{
 			name:      "universe scope no gateway",
 			routes:    []RouteConfig{{Destination: "10.0.0.0/8", Scope: scopeUniverse}},
 			fieldPath: "routes",
@@ -392,6 +429,39 @@ func TestValidateRoutes(t *testing.T) {
 		{
 			name:      "invalid source IP",
 			routes:    []RouteConfig{{Destination: "0.0.0.0/0", Gateway: "192.168.1.1", Source: "not-an-ip"}},
+			fieldPath: "routes",
+			expectErr: true,
+			errCount:  1,
+		},
+		{
+			name:      "valid IPv6 route with gateway matching the destination IP family",
+			routes:    []RouteConfig{{Destination: "2001:db8:1::/64", Gateway: "2001:db8::1", Scope: scopeUniverse}},
+			fieldPath: "routes",
+			expectErr: false,
+		},
+		{
+			name:      "valid IPv4 route with gateway and source matching the destination IP family",
+			routes:    []RouteConfig{{Destination: "10.0.0.0/8", Gateway: "192.168.1.1", Source: "192.168.1.2", Scope: scopeUniverse}},
+			fieldPath: "routes",
+			expectErr: false,
+		},
+		{
+			name:      "gateway family mismatch (IPv4 destination, IPv6 gateway)",
+			routes:    []RouteConfig{{Destination: "10.0.0.0/8", Gateway: "2001:db8::1", Scope: scopeUniverse}},
+			fieldPath: "routes",
+			expectErr: true,
+			errCount:  1,
+		},
+		{
+			name:      "gateway family mismatch (IPv6 destination, IPv4 gateway)",
+			routes:    []RouteConfig{{Destination: "2001:db8::/64", Gateway: "192.168.1.1", Scope: scopeUniverse}},
+			fieldPath: "routes",
+			expectErr: true,
+			errCount:  1,
+		},
+		{
+			name:      "source family mismatch (IPv4 destination, IPv6 source)",
+			routes:    []RouteConfig{{Destination: "10.0.0.0/8", Gateway: "192.168.1.1", Source: "2001:db8::2"}},
 			fieldPath: "routes",
 			expectErr: true,
 			errCount:  1,
@@ -468,6 +538,19 @@ func TestValidateRules(t *testing.T) {
 		{
 			name:      "invalid destination CIDR",
 			rules:     []RuleConfig{{Destination: "invalid-cidr"}},
+			fieldPath: "rules",
+			expectErr: true,
+			errCount:  1,
+		},
+		{
+			name:      "valid IPv6 rule with matching source and destination IP family",
+			rules:     []RuleConfig{{Source: "2001:db8::/64", Destination: "2001:db8:1::/64", Table: 100}},
+			fieldPath: "rules",
+			expectErr: false,
+		},
+		{
+			name:      "source and destination family mismatch",
+			rules:     []RuleConfig{{Source: "10.0.0.0/8", Destination: "2001:db8::/32", Table: 100}},
 			fieldPath: "rules",
 			expectErr: true,
 			errCount:  1,

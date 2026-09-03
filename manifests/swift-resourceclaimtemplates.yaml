@@ -1,0 +1,184 @@
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: pod-subnet-shared-rct
+spec:
+  spec:
+    devices:
+      requests:
+      - name: nic
+        firstAvailable:
+        # KEP-4816: Prioritized list
+        - name: preferred-nic
+          deviceClassName: swift-shared-nic-matching-pod-subnet # 1st: Try matching subnet
+          count: 1
+          # No capacity specified - uses requestPolicy.default ("1")
+        - name: fallback-nic
+          deviceClassName: swift-shared-nic-pristine # 2nd: Try pristine NIC
+          count: 1
+      config:
+      - requests: [ "nic" ]
+        opaque:
+          driver: networking.azure.com
+          parameters:
+            deviceType: acn.azure.com/vnet-nic
+            networkID: 11ab862b-8f4b-43b1-9224-c4da60ab7b04
+            subnetResourceID: /subscriptions/37deca37-c375-4a14-b90a-043849bd2bf1/resourceGroups/MC_poddensitytesting_infrastamp_westus2/providers/Microsoft.Network/virtualNetworks/aks-vnet-39571750/subnets/pod-subnet
+            subnetAllocationMode: PrefixBlock
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: cxsub-shared-rct
+spec:
+  spec:
+    devices:
+      requests:
+      - name: nic
+        firstAvailable:
+        # KEP-4816: Prioritized list
+        - name: preferred-nic
+          deviceClassName: swift-shared-nic-matching-cxsub # 1st: Try matching subnet
+          count: 1
+          # No capacity specified - uses requestPolicy.default ("1")
+        - name: fallback-nic
+          deviceClassName: swift-shared-nic-pristine # 2nd: Try pristine NIC
+          count: 1
+      config:
+      - requests: [ "nic" ]
+        opaque:
+          driver: networking.azure.com
+          parameters:
+            deviceType: acn.azure.com/vnet-nic
+            networkID: fe06c122-6ad1-41e6-bc22-b7e728c592b9
+            subnetResourceID: /subscriptions/37deca37-c375-4a14-b90a-043849bd2bf1/resourceGroups/sv2-kmurudi-cust-westus2/providers/Microsoft.Network/virtualNetworks/customervnet/subnets/cxsub
+            subnetAllocationMode: PrefixBlock
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: dedicatedcxsub1-rct
+spec:
+  spec:
+    devices:
+      requests:
+      - name: nic
+        exactly:
+          deviceClassName: swift-dedicated-nic # Requires pristine NIC (subnet="")
+          count: 1
+          # No capacity specified - uses requestPolicy.default ("1")
+      config:
+      - requests: [ "nic" ]
+        opaque:
+          driver: networking.azure.com
+          parameters:
+            deviceType: acn.azure.com/vnet-nic
+            networkID: 9b9d4ab4-4ed8-4bfa-99b4-ce9d29f730f0
+            subnetResourceID: /subscriptions/37deca37-c375-4a14-b90a-043849bd2bf1/resourceGroups/poddensityeuap/providers/Microsoft.Network/virtualNetworks/customervnet/subnets/dedicatedcxsub1
+            subnetAllocationMode: Single
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: dedicatedsubnet3-rct
+spec:
+  spec:
+    devices:
+      requests:
+      - name: nic
+        exactly:
+          deviceClassName: swift-dedicated-nic
+          count: 1
+      config:
+      - requests: [ "nic" ]
+        opaque:
+          driver: networking.azure.com
+          parameters:
+            deviceType: acn.azure.com/vnet-nic
+            networkID: 9b9d4ab4-4ed8-4bfa-99b4-ce9d29f730f0
+            subnetResourceID: /subscriptions/37deca37-c375-4a14-b90a-043849bd2bf1/resourceGroups/poddensityeuap/providers/Microsoft.Network/virtualNetworks/customervnet/subnets/dedicatedsubnet3
+            subnetAllocationMode: Single
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: sharedcxsub1-shared-rct
+spec:
+  spec:
+    devices:
+      requests:
+      - name: nic
+        firstAvailable:
+        # KEP-4816: Prioritized list
+        - name: preferred-nic
+          deviceClassName: swift-shared-nic-matching-sharedcxsub1 # 1st: Try matching subnet
+          count: 1
+          # No capacity specified - uses requestPolicy.default ("1")
+        - name: fallback-nic
+          deviceClassName: swift-shared-nic-pristine # 2nd: Try pristine NIC
+          count: 1
+      config:
+      - requests: [ "nic" ]
+        opaque:
+          driver: networking.azure.com
+          parameters:
+            deviceType: acn.azure.com/vnet-nic
+            networkID: 9b9d4ab4-4ed8-4bfa-99b4-ce9d29f730f0
+            subnetResourceID: /subscriptions/37deca37-c375-4a14-b90a-043849bd2bf1/resourceGroups/poddensityeuap/providers/Microsoft.Network/virtualNetworks/customervnet/subnets/sharedcxsub1
+            subnetAllocationMode: PrefixBlock
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: sharedcxsub2-shared-rct
+spec:
+  spec:
+    devices:
+      requests:
+      - name: nic
+        firstAvailable:
+        # KEP-4816: Prioritized list
+        - name: preferred-nic
+          deviceClassName: swift-shared-nic-matching-sharedcxsub2 # 1st: Try matching subnet
+          count: 1
+          # No capacity specified - uses requestPolicy.default ("1")
+        - name: fallback-nic
+          deviceClassName: swift-shared-nic-pristine # 2nd: Try pristine NIC
+          count: 1
+      config:
+      - requests: [ "nic" ]
+        opaque:
+          driver: networking.azure.com
+          parameters:
+            deviceType: acn.azure.com/vnet-nic
+            networkID: 9b9d4ab4-4ed8-4bfa-99b4-ce9d29f730f0
+            subnetResourceID: /subscriptions/37deca37-c375-4a14-b90a-043849bd2bf1/resourceGroups/poddensityeuap/providers/Microsoft.Network/virtualNetworks/customervnet/subnets/sharedcxsub2
+            subnetAllocationMode: PrefixBlock
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: scaledel-shared-rct
+spec:
+  spec:
+    devices:
+      requests:
+      - name: nic
+        firstAvailable:
+        # KEP-4816: Prioritized list
+        - name: preferred-nic
+          deviceClassName: swift-shared-nic-matching-scaledel # 1st: Try matching subnet
+          count: 1
+          # No capacity specified - uses requestPolicy.default ("1")
+        - name: fallback-nic
+          deviceClassName: swift-shared-nic-pristine # 2nd: Try pristine NIC
+          count: 1
+      config:
+      - requests: [ "nic" ]
+        opaque:
+          driver: networking.azure.com
+          parameters:
+            deviceType: acn.azure.com/vnet-nic
+            networkID: 9b9d4ab4-4ed8-4bfa-99b4-ce9d29f730f0
+            subnetResourceID: /subscriptions/37deca37-c375-4a14-b90a-043849bd2bf1/resourceGroups/poddensityeuap/providers/Microsoft.Network/virtualNetworks/customervnet/subnets/scaledel
+            subnetAllocationMode: PrefixBlock

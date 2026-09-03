@@ -21,17 +21,24 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
 	"sigs.k8s.io/dranet/pkg/apis"
+	"sigs.k8s.io/dranet/pkg/cnsclient"
+	"sigs.k8s.io/dranet/pkg/features"
 	"sigs.k8s.io/dranet/pkg/filter"
+	"sigs.k8s.io/dranet/pkg/inventory"
+
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/Mellanox/rdmamap"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 	"sigs.k8s.io/dranet/internal/nlwrap"
 
+	v1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/runtime"
@@ -43,7 +50,48 @@ import (
 
 const (
 	rdmaCmPath = "/dev/infiniband/rdma_cm"
+
+	// CNS NIC resource attribute keys (per dra.pdf ResourceSlice spec)
+	cnsAttrNIC       = "networking.azure.com/nic"
+	cnsAttrSubnet    = "networking.azure.com/subnet"
+	cnsAttrNetworkID = "networking.azure.com/networkID"
+	cnsAttrMac       = "networking.azure.com/mac"
+	cnsAttrShared    = "networking.azure.com/shared"
+
+	// Consumable capacity key (KEP-5075)
+	cnsCapSlots        = "networking.azure.com/slots"
+	cnsTaintNoCapacity = "networking.azure.com/no-capacity"
+
+	// secondaryNICsPoolName is the ResourceSlice pool name used by the CNS
+	// publisher to expose all secondary NIC devices for a node under a
+	// single, well-known pool. Keep the existing wire-visible value for
+	// compatibility with allocated ResourceClaims.
+	secondaryNICsPoolName = "exclusive-nics"
+
+	// cnsPrepareRetryInterval is how often prepareCNSResourceClaim re-calls
+	// CNS while waiting for the MultitenantPodNetworkConfig to become ready.
+	cnsPrepareRetryInterval = 500 * time.Millisecond
+
+	// cnsPrepareRetryTimeout is the maximum wall-clock time prepareCNSResourceClaim
+	// will spend retrying transient CNS readiness errors inside a single
+	// NodePrepareResources call. Kept well below kubelet's gRPC plugin timeout
+	// so we never get cancelled mid-retry. Tuned for the common case where
+	// MTPNC settles within ~1-3s after pod scheduling; if it takes longer we
+	// fall back to kubelet's pod sync retry.
+	cnsPrepareRetryTimeout = 10 * time.Second
 )
+
+// isCNSNotReadyErr returns true when err indicates the per-pod CNS state
+// (claim resource info, MTPNC, or pod IP config) may not yet be available.
+func isCNSNotReadyErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "failed to get CNS claim resource info for claim") ||
+		strings.Contains(msg, "mtpnc is not ready") ||
+		strings.Contains(msg, "network is not ready")
+}
 
 // DRA hooks exposes Network Devices to Kubernetes, the Network devices and its attributes are
 // obtained via the netdb to decouple the discovery of the interfaces with the execution.
@@ -56,18 +104,31 @@ func (np *NetworkDriver) PublishResources(ctx context.Context) {
 	klog.V(2).Infof("Publishing resources")
 	for {
 		select {
-		case devices := <-np.netdb.GetResources(ctx):
-			klog.V(3).Infof("Got %d devices from inventory: %s", len(devices), formatDeviceNames(devices, 15))
-			devices = filter.FilterDevices(np.celProgram, devices)
-			klog.V(3).Infof("After filtering, publishing %d devices in ResourceSlice(s): %s", len(devices), formatDeviceNames(devices, 15))
+		// Wait for updates from the host-discovered (live) device inventory
+		case live := <-np.netdb.GetResources(ctx):
+			klog.V(3).Infof("Got %d devices from inventory: %s", len(live), formatDeviceNames(live, 15))
 
-			np.publishResourcesPrometheusMetrics(devices)
-
-			resources := resourceslice.DriverResources{
-				Pools: map[string]resourceslice.Pool{
-					np.nodeName: {Slices: []resourceslice.Slice{{Devices: devices}}}},
+			// Fetch device snapshots from BoltDB store and merge
+			merged := live
+			if features.DefaultFeatureGate.Enabled(features.PersistentResourceSliceAttributes) {
+				snapshots := np.podConfigStore.GetAllocatedDeviceSnapshots()
+				merged = mergeDevices(live, snapshots)
 			}
-			err := np.draPlugin.PublishResources(ctx, resources)
+
+			// Apply filtering on the merged set of devices
+			filtered := filter.FilterDevices(np.celProgram, merged)
+
+			klog.V(3).Infof("After database merging and filtering, publishing %d devices in ResourceSlice(s): %s", len(filtered), formatDeviceNames(filtered, 15))
+
+			np.publishResourcesPrometheusMetrics(filtered)
+
+			np.mu.Lock()
+			np.inventoryPools = map[string]resourceslice.Pool{
+				np.nodeName: {Slices: []resourceslice.Slice{{Devices: filtered}}},
+			}
+			np.mu.Unlock()
+
+			err := np.publishInventoryResources(ctx)
 			if err != nil {
 				klog.Error(err, "unexpected error trying to publish resources")
 			} else {
@@ -78,6 +139,335 @@ func (np *NetworkDriver) PublishResources(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// PublishCNSResources polls the CNS REST API for NIC resources and publishes
+// them as ResourceSlice pools alongside the inventory-discovered devices.
+func (np *NetworkDriver) PublishCNSResources(ctx context.Context) {
+	klog.V(2).Infof("Starting CNS resource publishing loop")
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	// The ticker's first tick is at t=5s. Run one pass eagerly so the secondary NIC
+	// masquerade-exemption reconcile (and the ResourceSlice publish) happen at
+	// startup rather than 5s later, restoring exemptions for already-running
+	// shared pods promptly after a dranet restart or node reboot.
+	if err := np.publishCNSResources(ctx); err != nil {
+		klog.Errorf("failed to publish CNS resources (initial): %v", err)
+	}
+
+	for {
+		select {
+		case <-ticker.C:
+			if err := np.publishCNSResources(ctx); err != nil {
+				klog.Errorf("failed to publish CNS resources: %v", err)
+			}
+		case <-ctx.Done():
+			klog.V(2).Infof("CNS resource publishing loop stopped")
+			return
+		}
+	}
+}
+
+// publishCNSResources fetches the current NIC resources from CNS, checks for
+// NICNetworkConfig CRDs to determine capacity, and triggers a merged publish.
+func (np *NetworkDriver) publishCNSResources(ctx context.Context) error {
+	nicResources, err := np.cnsClient.GetNICResources(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get NIC resources from CNS: %w", err)
+	}
+	klog.V(3).Infof("Got %d NIC resources from CNS", len(nicResources))
+
+	np.mu.Lock()
+	prev := np.lastCNSNICs
+	np.lastCNSNICs = nicResources
+	np.mu.Unlock()
+
+	logCNSNICChanges(prev, nicResources)
+
+	// Reconcile host masquerade exemptions for shared-mode secondary NICs.
+	// This is the durability backstop for the per-attach ensure: it re-asserts the
+	// rule for shared NICs whose pods are already running (NRI does not replay
+	// attach across a dranet restart) and after an external nat flush or node
+	// reboot. Ensure-only and check-first, so steady state is read-only.
+	reconcileSharedNICNATExemptions(nicResources)
+
+	return np.publishCNSPools(ctx, np.buildCNSPools(nicResources))
+}
+
+// buildCNSPools builds the secondary-NIC ResourceSlice pool from the given CNS
+// NIC resources. The published pool name remains "exclusive-nics" for compatibility.
+func (np *NetworkDriver) buildCNSPools(nicResources []cnsclient.NICResource) map[string]resourceslice.Pool {
+	pools := make(map[string]resourceslice.Pool, 1)
+	allDevices := make([]resourceapi.Device, 0, len(nicResources))
+	for i := range nicResources {
+		nic := &nicResources[i]
+		klog.V(3).Infof("CNS NIC[%d]: InterfaceName=%q MacAddress=%q VMUniqueID=%q NetworkID=%q SubnetName=%q SubnetGUID=%q Capacity=%d",
+			i, nic.InterfaceName, nic.MacAddress, nic.VMUniqueID, nic.NetworkID, nic.SubnetName, nic.SubnetGUID, nic.Capacity)
+		allDevices = append(allDevices, np.buildCNSDevices(nic)...)
+	}
+	if len(allDevices) > 0 {
+		pools[secondaryNICsPoolName] = resourceslice.Pool{
+			Slices: []resourceslice.Slice{{Devices: allDevices}},
+		}
+	}
+	return pools
+}
+
+// mergeNICResource overlays the fields RequestClaimResourceInfo returns for a NIC
+// onto dst and returns the result. Capacity is always authoritative and is carried
+// forward even when 0 (not schedulable). networkID/subnet are updated when present
+// but never blanked (they are empty for exclusive MTPNC-only NICs).
+// InterfaceName/InterfaceCompartmentID/VMUniqueID are not returned by
+// RequestClaimResourceInfo, so they are preserved from dst (the GetNICResources poll).
+func mergeNICResource(dst, src cnsclient.NICResource) cnsclient.NICResource {
+	dst.Capacity = src.Capacity
+	if src.NetworkID != "" {
+		dst.NetworkID = src.NetworkID
+	}
+	if src.SubnetGUID != "" {
+		dst.SubnetGUID = src.SubnetGUID
+	}
+	if src.SubnetName != "" {
+		dst.SubnetName = src.SubnetName
+	}
+	return dst
+}
+
+// updateCNSResourceSlicesForClaim merges the NIC resources returned by
+// RequestClaimResourceInfo into the secondary-NIC pool and republishes
+// it. Merging (rather than replacing) updates capacity/subnet/vnet for the
+// claim's MACs and adds any new MACs without deleting existing devices or fields.
+// Because both GetNICResources (the poll) and RequestClaimResourceInfo return the
+// latest CNS state, the periodic poll converges on the same data.
+func (np *NetworkDriver) updateCNSResourceSlicesForClaim(ctx context.Context, claimNICs []cnsclient.NICResource) error {
+	if len(claimNICs) == 0 {
+		return nil
+	}
+
+	np.mu.Lock()
+	merged := make([]cnsclient.NICResource, len(np.lastCNSNICs))
+	copy(merged, np.lastCNSNICs)
+	indexByMAC := make(map[string]int, len(merged))
+	for i := range merged {
+		indexByMAC[merged[i].MacAddress] = i
+	}
+	for _, cn := range claimNICs {
+		if idx, ok := indexByMAC[cn.MacAddress]; ok {
+			merged[idx] = mergeNICResource(merged[idx], cn)
+		} else {
+			indexByMAC[cn.MacAddress] = len(merged)
+			merged = append(merged, cn)
+		}
+	}
+	np.lastCNSNICs = merged
+	np.mu.Unlock()
+
+	return np.publishCNSPools(ctx, np.buildCNSPools(merged))
+}
+
+// reconcileSharedNICNATExemptions ensures the host masquerade-exemption rule is
+// present for every shared-mode secondary NIC currently reported by CNS.
+//
+// A NIC is shared-and-host-visible when CNS reports Capacity > 1 (the MAC has a
+// NICNetworkConfig CRD) and a non-empty InterfaceName (the NIC is in the host
+// namespace, not already moved into a pod netns). Exclusive NICs (Capacity == 1)
+// and NICs already inside a pod netns (empty InterfaceName) are skipped: they
+// have no host-namespace egress to protect.
+//
+// The pass is ensure-only and check-first (see ensureSharedNICNATExemption), so it
+// is cheap to run on every CNS poll and never prunes; a stale exemption left
+// after a NIC leaves shared mode is inert.
+func reconcileSharedNICNATExemptions(nics []cnsclient.NICResource) {
+	for i := range nics {
+		nic := &nics[i]
+		if nic.Capacity <= 1 || nic.InterfaceName == "" {
+			continue
+		}
+		if err := ensureSharedNICNATExemption(nic.InterfaceName); err != nil {
+			klog.Errorf("secondary NIC: failed to reconcile NAT exemption for shared NIC %s (MAC %s): %v",
+				nic.InterfaceName, nic.MacAddress, err)
+		}
+	}
+}
+
+// logCNSNICChanges compares the previous and current NIC resource lists from
+// CNS and logs any additions, removals, or field-level changes.
+func logCNSNICChanges(prev, curr []cnsclient.NICResource) {
+	if prev == nil {
+		klog.V(2).Infof("CNS ResourceSlice: initial publish with %d NIC(s)", len(curr))
+		return
+	}
+
+	prevByMAC := make(map[string]cnsclient.NICResource, len(prev))
+	for _, n := range prev {
+		prevByMAC[n.MacAddress] = n
+	}
+	currByMAC := make(map[string]cnsclient.NICResource, len(curr))
+	for _, n := range curr {
+		currByMAC[n.MacAddress] = n
+	}
+
+	changed := false
+
+	// Detect additions
+	for mac, n := range currByMAC {
+		if _, ok := prevByMAC[mac]; !ok {
+			changed = true
+			klog.Infof("CNS ResourceSlice ADDED NIC: InterfaceName=%q MAC=%q VMUniqueID=%q NetworkID=%q SubnetName=%q SubnetGUID=%q Capacity=%d",
+				n.InterfaceName, n.MacAddress, n.VMUniqueID, n.NetworkID, n.SubnetName, n.SubnetGUID, n.Capacity)
+		}
+	}
+
+	// Detect removals
+	for mac, n := range prevByMAC {
+		if _, ok := currByMAC[mac]; !ok {
+			changed = true
+			klog.Infof("CNS ResourceSlice REMOVED NIC: InterfaceName=%q MAC=%q VMUniqueID=%q NetworkID=%q SubnetName=%q SubnetGUID=%q Capacity=%d",
+				n.InterfaceName, n.MacAddress, n.VMUniqueID, n.NetworkID, n.SubnetName, n.SubnetGUID, n.Capacity)
+		}
+	}
+
+	// Detect field changes on existing NICs
+	for mac, c := range currByMAC {
+		p, ok := prevByMAC[mac]
+		if !ok {
+			continue
+		}
+		var diffs []string
+		if p.InterfaceName != c.InterfaceName {
+			diffs = append(diffs, fmt.Sprintf("InterfaceName: %q -> %q", p.InterfaceName, c.InterfaceName))
+		}
+		if p.VMUniqueID != c.VMUniqueID {
+			diffs = append(diffs, fmt.Sprintf("VMUniqueID: %q -> %q", p.VMUniqueID, c.VMUniqueID))
+		}
+		if p.NetworkID != c.NetworkID {
+			diffs = append(diffs, fmt.Sprintf("NetworkID: %q -> %q", p.NetworkID, c.NetworkID))
+		}
+		if p.SubnetGUID != c.SubnetGUID {
+			diffs = append(diffs, fmt.Sprintf("SubnetGUID: %q -> %q", p.SubnetGUID, c.SubnetGUID))
+		}
+		if p.SubnetName != c.SubnetName {
+			diffs = append(diffs, fmt.Sprintf("SubnetName: %q -> %q", p.SubnetName, c.SubnetName))
+		}
+		if p.Capacity != c.Capacity {
+			diffs = append(diffs, fmt.Sprintf("Capacity: %d -> %d", p.Capacity, c.Capacity))
+		}
+		if len(diffs) > 0 {
+			changed = true
+			klog.Infof("CNS ResourceSlice CHANGED NIC MAC=%q: %s", mac, strings.Join(diffs, ", "))
+		}
+	}
+
+	if !changed {
+		klog.V(4).Infof("CNS ResourceSlice: no changes (%d NICs)", len(curr))
+	}
+}
+
+// buildCNSDevices converts a single CNS NICResource into a DRA Device
+// per the ResourceSlice spec in dra.pdf (KEP-5075 Consumable Capacity).
+//
+// Each NIC becomes one device with:
+//   - allowMultipleAllocations: true
+//   - attributes: networking.azure.com/nic (NIC name), networking.azure.com/subnet (subnet GUID),
+//     networking.azure.com/networkID,
+//     networking.azure.com/mac, networking.azure.com/shared
+//   - capacity: networking.azure.com/slots with requestPolicy default=1, validRange min=1 max=1
+//     when the NIC has schedulable capacity
+//   - taint: networking.azure.com/no-capacity=true:NoSchedule when capacity is zero
+func (np *NetworkDriver) buildCNSDevices(nic *cnsclient.NICResource) []resourceapi.Device {
+	deviceName := cnsNICDeviceName(nic)
+
+	// networking.azure.com/nic = human-readable interface name (e.g., "eth1").
+	// Prefer InterfaceName, then Name, then fall back to MAC-derived deviceName.
+	nicName := deviceName
+	if nic.InterfaceName != "" {
+		nicName = nic.InterfaceName
+	}
+	// networking.azure.com/subnet = customer subnet GUID provided by CNS.
+	subnet := nic.SubnetGUID
+	// networking.azure.com/networkID = network ID from CNS
+	networkID := nic.NetworkID
+
+	macAddr := nic.MacAddress
+	allowMultiAttr := true
+	attrs := map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+		cnsAttrNIC:    {StringValue: &nicName},
+		cnsAttrSubnet: {StringValue: &subnet},
+		cnsAttrMac:    {StringValue: &macAddr},
+		cnsAttrShared: {BoolValue: &allowMultiAttr},
+	}
+	// Only add networkID if it's non-empty
+	if networkID != "" {
+		attrs[cnsAttrNetworkID] = resourceapi.DeviceAttribute{StringValue: &networkID}
+	}
+
+	// CNS capacity is authoritative, including zero when the NIC is not schedulable.
+	slots := int64(nic.Capacity)
+	allowMulti := true
+	var requestPolicy *resourceapi.CapacityRequestPolicy
+	var taints []resourceapi.DeviceTaint
+	if slots == 0 {
+		taints = []resourceapi.DeviceTaint{{
+			Key:    cnsTaintNoCapacity,
+			Value:  "true",
+			Effect: resourceapi.DeviceTaintEffectNoSchedule,
+		}}
+	} else {
+		defaultQty := resource.MustParse("1")
+		minQty := resource.MustParse("1")
+		maxQty := resource.MustParse("1")
+		requestPolicy = &resourceapi.CapacityRequestPolicy{
+			Default: &defaultQty,
+			ValidRange: &resourceapi.CapacityRequestPolicyRange{
+				Min: &minQty,
+				Max: &maxQty,
+			},
+		}
+	}
+
+	return []resourceapi.Device{
+		{
+			Name:                     deviceName,
+			AllowMultipleAllocations: &allowMulti,
+			Attributes:               attrs,
+			Taints:                   taints,
+			Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
+				cnsCapSlots: {
+					Value:         *resource.NewQuantity(slots, resource.DecimalSI),
+					RequestPolicy: requestPolicy,
+				},
+			},
+		},
+	}
+}
+
+// publishInventoryResources publishes inventory-discovered devices via the
+// main DRA plugin (driver: dra.net).
+func (np *NetworkDriver) publishInventoryResources(ctx context.Context) error {
+	np.mu.Lock()
+	pools := make(map[string]resourceslice.Pool, len(np.inventoryPools))
+	for k, v := range np.inventoryPools {
+		pools[k] = v
+	}
+	np.mu.Unlock()
+
+	return np.draPlugin.PublishResources(ctx, resourceslice.DriverResources{Pools: pools})
+}
+
+// publishCNSPools publishes CNS NIC resources via the separate CNS plugin
+// (driver: networking.azure.com).
+func (np *NetworkDriver) publishCNSPools(ctx context.Context, pools map[string]resourceslice.Pool) error {
+	if np.cnsPlugin == nil {
+		return fmt.Errorf("CNS plugin not initialized")
+	}
+	return np.cnsPlugin.PublishResources(ctx, resourceslice.DriverResources{Pools: pools})
+}
+
+// sanitizeMACForK8s converts a MAC address to a Kubernetes-compatible name
+// by lowercasing and replacing colons with hyphens.
+func sanitizeMACForK8s(mac string) string {
+	return strings.ReplaceAll(strings.ToLower(mac), ":", "-")
 }
 
 func (np *NetworkDriver) publishResourcesPrometheusMetrics(devices []resourceapi.Device) {
@@ -125,10 +515,195 @@ func (np *NetworkDriver) prepareResourceClaims(ctx context.Context, claims []*re
 	result := make(map[types.UID]kubeletplugin.PrepareResult)
 
 	for _, claim := range claims {
-		klog.V(2).Infof("NodePrepareResources: Claim Request %s/%s", claim.Namespace, claim.Name)
-		result[claim.UID] = np.prepareResourceClaim(ctx, claim)
+		isCNS := np.isCNSClaim(claim)
+		klog.Infof("NodePrepareResources: Claim %s/%s UID=%s isCNS=%v cnsDriverName=%q allocatedDevices=%d reservedFor=%d",
+			claim.Namespace, claim.Name, claim.UID, isCNS, np.cnsDriverName,
+			len(claim.Status.Allocation.Devices.Results), len(claim.Status.ReservedFor))
+		for i, result := range claim.Status.Allocation.Devices.Results {
+			klog.Infof("  Claim %s/%s DeviceResult[%d]: Driver=%q Pool=%q Device=%q Request=%q",
+				claim.Namespace, claim.Name, i, result.Driver, result.Pool, result.Device, result.Request)
+		}
+		for i, ref := range claim.Status.ReservedFor {
+			klog.Infof("  Claim %s/%s ReservedFor[%d]: Resource=%q Name=%q UID=%s",
+				claim.Namespace, claim.Name, i, ref.Resource, ref.Name, ref.UID)
+		}
+		if isCNS {
+			result[claim.UID] = np.prepareCNSResourceClaim(ctx, claim)
+		} else {
+			result[claim.UID] = np.prepareResourceClaim(ctx, claim)
+		}
 	}
 	return result, nil
+}
+
+// isCNSClaim returns true if the claim has any device results managed by the CNS driver.
+func (np *NetworkDriver) isCNSClaim(claim *resourceapi.ResourceClaim) bool {
+	if np.cnsDriverName == "" {
+		klog.V(4).Infof("isCNSClaim: cnsDriverName is empty, returning false for claim %s/%s", claim.Namespace, claim.Name)
+		return false
+	}
+	if claim.Status.Allocation == nil {
+		klog.V(4).Infof("isCNSClaim: allocation is nil for claim %s/%s", claim.Namespace, claim.Name)
+		return false
+	}
+	for _, result := range claim.Status.Allocation.Devices.Results {
+		if result.Driver == np.cnsDriverName {
+			klog.V(4).Infof("isCNSClaim: matched CNS driver %q on device %q for claim %s/%s",
+				result.Driver, result.Device, claim.Namespace, claim.Name)
+			return true
+		}
+	}
+	klog.V(4).Infof("isCNSClaim: no device matched cnsDriverName=%q for claim %s/%s", np.cnsDriverName, claim.Namespace, claim.Name)
+	return false
+}
+
+// prepareCNSResourceClaim is the fast path for CNS-managed secondary NIC claims.
+// It queries CNS GetClaimResourceInfo once per claim for the pod's networking
+// goal state (pod IP configs and the claim's NIC resources), populates the
+// SecondaryNICPodConfigStore for downstream NRI use, and updates the externally named exclusive-nics
+// ResourceSlice with the NIC resources CNS reported. All heavy DRA work (routes,
+// rules, DHCP, ethtool, RDMA, eBPF) is skipped because the NRI hook
+// (runPodSandboxSecondaryNICs) handles network plumbing from CNS goal state.
+func (np *NetworkDriver) prepareCNSResourceClaim(ctx context.Context, claim *resourceapi.ResourceClaim) kubeletplugin.PrepareResult {
+	klog.V(2).Infof("prepareCNSResourceClaim Claim %s/%s (fast path)", claim.Namespace, claim.Name)
+	start := time.Now()
+	defer func() {
+		klog.V(2).Infof("prepareCNSResourceClaim Claim %s/%s took %v", claim.Namespace, claim.Name, time.Since(start))
+	}()
+
+	podConsumers := getPodConsumers(claim)
+	klog.Infof("prepareCNSResourceClaim: claim %s/%s has %d pod consumers", claim.Namespace, claim.Name, len(podConsumers))
+	for i, pod := range podConsumers {
+		klog.Infof("prepareCNSResourceClaim: consumer[%d] pod=%s/%s UID=%s", i, pod.Namespace, pod.Name, pod.UID)
+	}
+	if len(podConsumers) == 0 {
+		klog.Infof("no pods allocated to CNS claim %s/%s", claim.Namespace, claim.Name)
+		return kubeletplugin.PrepareResult{}
+	}
+	if len(podConsumers) > 1 {
+		return kubeletplugin.PrepareResult{
+			Err: fmt.Errorf("CNS claim %s/%s has %d pod consumers; only one is supported",
+				claim.Namespace, claim.Name, len(podConsumers)),
+		}
+	}
+
+	// The CNS client is required to fetch the claim's networking goal state.
+	// If CNS is unreachable the pod stays Pending and kubelet retries.
+	if np.cnsClient == nil {
+		return kubeletplugin.PrepareResult{
+			Err: fmt.Errorf("CNS client not configured for claim %s/%s", claim.Namespace, claim.Name),
+		}
+	}
+
+	secondaryNICCount := 0
+	for _, result := range claim.Status.Allocation.Devices.Results {
+		if result.Driver == np.cnsDriverName {
+			secondaryNICCount++
+		}
+	}
+	if secondaryNICCount != 1 {
+		return kubeletplugin.PrepareResult{
+			Err: fmt.Errorf("CNS claim %s/%s has %d secondary NIC devices; exactly one is supported",
+				claim.Namespace, claim.Name, secondaryNICCount),
+		}
+	}
+
+	var errorList []error
+	goalStateByClaim := map[types.UID]claimGoalState{}
+
+	klog.Infof("prepareCNSResourceClaim: iterating %d device results for claim %s/%s",
+		len(claim.Status.Allocation.Devices.Results), claim.Namespace, claim.Name)
+	for _, result := range claim.Status.Allocation.Devices.Results {
+		if result.Driver != np.cnsDriverName {
+			klog.V(4).Infof("prepareCNSResourceClaim: skipping device %q (driver=%q, not CNS driver %q)",
+				result.Device, result.Driver, np.cnsDriverName)
+			continue
+		}
+
+		deviceName := result.Device
+
+		// Capture the per-share identifier assigned by the scheduler for
+		// devices with DRAConsumableCapacity (allowMultipleAllocations=true).
+		// The API server's ResourceClaim status validator requires the
+		// (driver, pool, device, shareID) tuple to exactly match an entry
+		// in status.allocation.devices.results, so we must thread shareID
+		// through to the NRI hook that publishes status.devices.
+		var shareID string
+		if result.ShareID != nil {
+			shareID = string(*result.ShareID)
+		}
+
+		// Query CNS GetClaimResourceInfo (by claim UID) and store the
+		// per-pod networking config in SecondaryNICPodConfigStore for the NRI hook.
+		for _, pod := range podConsumers {
+			klog.Infof("prepareCNSResourceClaim: populating secondary NIC store for pod %s/%s UID=%s device=%q shareID=%q",
+				pod.Namespace, pod.Name, pod.UID, deviceName, shareID)
+			claimKey := types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}
+
+			// Retry locally on transient CNS readiness errors so the pod can
+			// start immediately once CNS finishes reconciling, instead of waiting
+			// for kubelet's next pod sync. Bounded by cnsPrepareRetryTimeout.
+			var lastErr error
+			deadline := time.Now().Add(cnsPrepareRetryTimeout)
+		retryLoop:
+			for attempt := 1; ; attempt++ {
+				lastErr = np.populateSecondaryNICStoreForDevice(ctx, claim.UID, pod, deviceName, claimKey, shareID, goalStateByClaim)
+				if lastErr == nil {
+					if attempt > 1 {
+						klog.Infof("prepareCNSResourceClaim: populateSecondaryNICStoreForDevice succeeded on attempt %d for pod %s/%s device %q",
+							attempt, pod.Namespace, pod.Name, deviceName)
+					}
+					break
+				}
+				if !isCNSNotReadyErr(lastErr) {
+					break
+				}
+				if !time.Now().Before(deadline) {
+					klog.Warningf("prepareCNSResourceClaim: gave up after %d attempts (%v) waiting for CNS for pod %s/%s device %q: %v",
+						attempt, cnsPrepareRetryTimeout, pod.Namespace, pod.Name, deviceName, lastErr)
+					break
+				}
+				klog.V(2).Infof("prepareCNSResourceClaim: CNS not ready (attempt %d) for pod %s/%s device %q, retrying in %v: %v",
+					attempt, pod.Namespace, pod.Name, deviceName, cnsPrepareRetryInterval, lastErr)
+				select {
+				case <-ctx.Done():
+					lastErr = ctx.Err()
+					break retryLoop
+				case <-time.After(cnsPrepareRetryInterval):
+				}
+			}
+			if lastErr != nil {
+				klog.Errorf("prepareCNSResourceClaim: populateSecondaryNICStoreForDevice failed for pod %s/%s device %q: %v",
+					pod.Namespace, pod.Name, deviceName, lastErr)
+				errorList = append(errorList, lastErr)
+			}
+		}
+	}
+
+	// Update the externally named exclusive-nics ResourceSlice with the fresh per-NIC state
+	// (capacity/subnet/vnet) CNS returned for this claim's NICs. Best-effort:
+	// a failure here does not fail pod preparation.
+	if gs, ok := goalStateByClaim[claim.UID]; ok && len(gs.nicResources) > 0 {
+		if err := np.updateCNSResourceSlicesForClaim(ctx, gs.nicResources); err != nil {
+			klog.Warningf("prepareCNSResourceClaim: failed to update ResourceSlices for claim %s/%s: %v", claim.Namespace, claim.Name, err)
+		}
+	}
+
+	if len(errorList) > 0 {
+		klog.Infof("CNS claim %s contain errors: %v", claim.UID, errors.Join(errorList...))
+		return kubeletplugin.PrepareResult{
+			Err: fmt.Errorf("CNS claim %s contain errors: %w", claim.UID, errors.Join(errorList...)),
+		}
+	}
+	klog.Infof("prepareCNSResourceClaim: claim %s/%s completed successfully", claim.Namespace, claim.Name)
+	return kubeletplugin.PrepareResult{}
+}
+
+// cnsNICDeviceName returns the stable ResourceSlice device and pool suffix for
+// a CNS NICResource. MAC is the canonical NIC identity because CNS may report
+// Name as either an interface name or a MAC address across NIC types.
+func cnsNICDeviceName(nic *cnsclient.NICResource) string {
+	return sanitizeMACForK8s(nic.MacAddress)
 }
 
 // prepareResourceClaim gets all the configuration required to be applied at runtime and passes it downs to the handlers.
@@ -142,19 +717,25 @@ func (np *NetworkDriver) prepareResourceClaim(ctx context.Context, claim *resour
 	defer func() {
 		klog.V(2).Infof("PrepareResourceClaim Claim %s/%s  took %v", claim.Namespace, claim.Name, time.Since(start))
 	}()
-	// TODO: shared devices may allocate the same device to multiple pods, i.e. macvlan, ipvlan, ...
-	podUIDs := []types.UID{}
-	for _, reserved := range claim.Status.ReservedFor {
-		if reserved.Resource != "pods" || reserved.APIGroup != "" {
-			klog.Infof("Driver only supports Pods, unsupported reference %#v", reserved)
-			continue
-		}
-		podUIDs = append(podUIDs, reserved.UID)
-	}
-	if len(podUIDs) == 0 {
+	if len(claim.Status.ReservedFor) == 0 {
 		klog.Infof("no pods allocated to claim %s/%s", claim.Namespace, claim.Name)
 		return kubeletplugin.PrepareResult{}
 	}
+	if len(claim.Status.ReservedFor) > 1 {
+		return kubeletplugin.PrepareResult{
+			Err: fmt.Errorf("driver only supports one pod per claim, got %d", len(claim.Status.ReservedFor)),
+		}
+	}
+
+	// One ResourceClaim is consumed by a single pod, regardless of whether the device is allocated in
+	// exclusive or shared (e.g., ipvlan, macvlan) way, so we process the first and only consumer in ReservedFor.
+	reserved := claim.Status.ReservedFor[0]
+	if reserved.Resource != "pods" || reserved.APIGroup != "" {
+		return kubeletplugin.PrepareResult{
+			Err: fmt.Errorf("driver only supports Pods, unsupported reference %#v", reserved),
+		}
+	}
+	podUID := reserved.UID
 
 	nlHandle, err := nlwrap.NewHandle()
 	if err != nil {
@@ -205,23 +786,75 @@ func (np *NetworkDriver) prepareResourceClaim(ctx context.Context, claim *resour
 			}
 		}
 
-		// Get network configuration from the cloud provider (if any) and merge it with the user configuration.
-		// User configuration always takes precedence in case of conflicts.
-		cloudConf, ok := np.netdb.GetDeviceConfig(result.Device)
-		if ok && cloudConf != nil {
-			klog.V(4).Infof("Found cloud provider configuration for device %s: %#v", result.Device, cloudConf)
+		mergedConf, err := np.getDeviceNetworkConfig(result.Device, claim.UID, userConf)
+		if err != nil {
+			errorList = append(errorList, err)
+			continue
 		}
-		mergedConf := apis.MergeNetworkConfig(userConf, cloudConf)
+
 		netconf := *mergedConf
 
 		klog.V(4).Infof("PrepareResourceClaim %s/%s final Configuration %#v", claim.Namespace, claim.Name, netconf)
-		podCfg := PodConfig{
+		// Query the local discovery database (netdb) for the card's clean attributes
+		var deviceSnapshot *resourceapi.Device
+		if device, ok := np.netdb.GetDevice(result.Device); ok {
+			deviceSnapshot = &device
+		} else {
+			klog.Warningf("Failed to find device %s in inventory for claim %s", result.Device, claim.UID)
+		}
+
+		deviceCfg := DeviceConfig{
 			Claim: types.NamespacedName{
 				Namespace: claim.Namespace,
 				Name:      claim.Name,
 			},
 			NetworkInterfaceConfigInPod: netconf,
+			DeviceSnapshot:              deviceSnapshot,
 		}
+
+		// Store early to guarantee profile cleanup on subsequent failures within this loop.
+		// If the preparation fails later, Kubelet will call UnprepareResourceClaims,
+		// which will find this early config and release the allocated profile.
+		if netconf.Profile != "" {
+			if err := np.podConfigStore.SetDeviceConfig(podUID, result.Device, deviceCfg); err != nil {
+				errorList = append(errorList, fmt.Errorf("failed to persist early device config for pod %s device %s: %v", podUID, result.Device, err))
+				// If we can't store it, we MUST release it immediately to prevent a leak.
+				if relErr := np.netdb.ReleaseProfileConfig(result.Device, claim.UID, &netconf); relErr != nil {
+					klog.Errorf("failed to rollback profile config for claim %v device %v: %v", claim.UID, result.Device, relErr)
+				}
+				continue
+			}
+		}
+
+		// IB-only path: device has RDMA capability but no netdev interface.
+		if np.netdb.IsIBOnlyDevice(result.Device) {
+			// Reject any network-specific config fields for RDMA-only devices.
+			for _, config := range claim.Status.Allocation.Devices.Config {
+				if config.Opaque == nil ||
+					config.Opaque.Driver != np.driverName ||
+					len(config.Requests) > 0 && !slices.Contains(config.Requests, requestName) {
+					continue
+				}
+				if errs := apis.ValidateRDMAOnlyConfig(&config.Opaque.Parameters); len(errs) > 0 {
+					errorList = append(errorList, errs...)
+				}
+			}
+			if len(errorList) > 0 {
+				continue
+			}
+			rdmaDevName, err := np.netdb.GetRDMADeviceName(result.Device)
+			if err != nil {
+				errorList = append(errorList, fmt.Errorf("failed to get RDMA device name for IB-only device %s: %v", result.Device, err))
+				continue
+			}
+			deviceCfg.RDMADevice = buildRDMAConfig(rdmaDevName, charDevices)
+			if err := np.podConfigStore.SetDeviceConfig(podUID, result.Device, deviceCfg); err != nil {
+				errorList = append(errorList, fmt.Errorf("failed to persist device config for pod %s device %s: %v", podUID, result.Device, err))
+			}
+			klog.V(4).Infof("IB-only claim resources for pod %s : %#v", podUID, deviceCfg)
+			continue
+		}
+
 		ifName, err := np.netdb.GetNetInterfaceName(result.Device)
 		if err != nil {
 			errorList = append(errorList, fmt.Errorf("failed to get network interface name for device %s: %v", result.Device, err))
@@ -233,17 +866,38 @@ func (np *NetworkDriver) prepareResourceClaim(ctx context.Context, claim *resour
 			errorList = append(errorList, fmt.Errorf("failed to get netlink to interface %s: %v", ifName, err))
 			continue
 		}
-		podCfg.NetworkInterfaceConfigInHost.Interface.Name = ifName
+		deviceCfg.NetworkInterfaceConfigInHost.Interface.Name = ifName
 
-		if podCfg.NetworkInterfaceConfigInPod.Interface.Name == "" {
+		if deviceCfg.NetworkInterfaceConfigInPod.Interface.Name == "" {
 			// If the interface name was not explicitly overridden, use the same
 			// interface name within the pod's network namespace.
-			podCfg.NetworkInterfaceConfigInPod.Interface.Name = ifName
+			deviceCfg.NetworkInterfaceConfigInPod.Interface.Name = ifName
+		}
+
+		// For SR-IOV VFs, the requested MTU must not exceed the parent PF's MTU.
+		// Otherwise the claim is rejected so the Pod fails fast instead of being
+		// created with an illegal MTU configuration.
+		if deviceCfg.NetworkInterfaceConfigInPod.Interface.MTU != nil && inventory.IsSriovVf(ifName) {
+			pfName, err := inventory.GetPFInterfaceName(ifName)
+			if err != nil {
+				errorList = append(errorList, fmt.Errorf("failed to determine parent PF for SR-IOV VF %s: %v", ifName, err))
+				continue
+			}
+			pfLink, err := nlHandle.LinkByName(pfName)
+			if err != nil {
+				errorList = append(errorList, fmt.Errorf("failed to get netlink to parent PF %s of VF %s: %v", pfName, ifName, err))
+				continue
+			}
+			requestedMTU := int(*deviceCfg.NetworkInterfaceConfigInPod.Interface.MTU)
+			if err := validateVFMTU(ifName, pfName, requestedMTU, pfLink.Attrs().MTU); err != nil {
+				errorList = append(errorList, err)
+				continue
+			}
 		}
 
 		// If DHCP is requested, do a DHCP request to gather the network parameters (IPs and Routes)
 		// ... but we DO NOT apply them in the root namespace
-		if podCfg.NetworkInterfaceConfigInPod.Interface.DHCP != nil && *podCfg.NetworkInterfaceConfigInPod.Interface.DHCP {
+		if deviceCfg.NetworkInterfaceConfigInPod.Interface.DHCP != nil && *deviceCfg.NetworkInterfaceConfigInPod.Interface.DHCP {
 			klog.V(2).Infof("trying to get network configuration via DHCP")
 			contextCancel, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
@@ -251,10 +905,10 @@ func (np *NetworkDriver) prepareResourceClaim(ctx context.Context, claim *resour
 			if err != nil {
 				errorList = append(errorList, fmt.Errorf("fail to get configuration via DHCP for %s: %w", ifName, err))
 			} else {
-				podCfg.NetworkInterfaceConfigInPod.Interface.Addresses = []string{ip}
-				podCfg.NetworkInterfaceConfigInPod.Routes = append(podCfg.NetworkInterfaceConfigInPod.Routes, routes...)
+				deviceCfg.NetworkInterfaceConfigInPod.Interface.Addresses = []string{ip}
+				deviceCfg.NetworkInterfaceConfigInPod.Routes = append(deviceCfg.NetworkInterfaceConfigInPod.Routes, routes...)
 			}
-		} else if len(podCfg.NetworkInterfaceConfigInPod.Interface.Addresses) == 0 {
+		} else if len(deviceCfg.NetworkInterfaceConfigInPod.Interface.Addresses) == 0 {
 			// If there is no custom addresses and no DHCP, then use the existing ones
 			// get the existing IP addresses
 			nlAddresses, err := nlHandle.AddrList(link, netlink.FAMILY_ALL)
@@ -268,13 +922,13 @@ func (np *NetworkDriver) prepareResourceClaim(ctx context.Context, claim *resour
 					if address.Scope != unix.RT_SCOPE_UNIVERSE {
 						continue
 					}
-					podCfg.NetworkInterfaceConfigInPod.Interface.Addresses = append(podCfg.NetworkInterfaceConfigInPod.Interface.Addresses, address.IPNet.String())
+					deviceCfg.NetworkInterfaceConfigInPod.Interface.Addresses = append(deviceCfg.NetworkInterfaceConfigInPod.Interface.Addresses, address.IPNet.String())
 				}
 			}
 		}
 
 		// Obtain the existing supported ethtool features and validate the config
-		if podCfg.NetworkInterfaceConfigInPod.Ethtool != nil {
+		if deviceCfg.NetworkInterfaceConfigInPod.Ethtool != nil {
 			client, err := newEthtoolClient(0)
 			if err != nil {
 				errorList = append(errorList, fmt.Errorf("fail to create ethtool client %v", err))
@@ -290,7 +944,7 @@ func (np *NetworkDriver) prepareResourceClaim(ctx context.Context, claim *resour
 
 			// translate features to the actual kernel names
 			ethtoolFeatures := map[string]bool{}
-			for feature, value := range podCfg.NetworkInterfaceConfigInPod.Ethtool.Features {
+			for feature, value := range deviceCfg.NetworkInterfaceConfigInPod.Ethtool.Features {
 				aliases := ifFeatures.Get(feature)
 				if len(aliases) == 0 {
 					errorList = append(errorList, fmt.Errorf("feature %s not supported by interface", feature))
@@ -300,7 +954,7 @@ func (np *NetworkDriver) prepareResourceClaim(ctx context.Context, claim *resour
 					ethtoolFeatures[alias] = value
 				}
 			}
-			podCfg.NetworkInterfaceConfigInPod.Ethtool.Features = ethtoolFeatures
+			deviceCfg.NetworkInterfaceConfigInPod.Ethtool.Features = ethtoolFeatures
 		}
 
 		// Obtain the routes and rules associated with the interface.
@@ -309,14 +963,18 @@ func (np *NetworkDriver) prepareResourceClaim(ctx context.Context, claim *resour
 			errorList = append(errorList, err)
 			continue
 		}
-		podCfg.NetworkInterfaceConfigInPod.Routes = append(podCfg.NetworkInterfaceConfigInPod.Routes, routes...)
+		deviceCfg.NetworkInterfaceConfigInPod.Routes = append(deviceCfg.NetworkInterfaceConfigInPod.Routes, routes...)
 
-		for _, table := range tables.UnsortedList() {
-			if rules, ok := rulesByTable[table]; ok {
-				klog.V(5).Infof("Adding %d rules for table %d associated with interface %s", len(rules), table, ifName)
-				podCfg.NetworkInterfaceConfigInPod.Rules = append(podCfg.NetworkInterfaceConfigInPod.Rules, rules...)
-				// Avoid adding the same rule twice
-				delete(rulesByTable, table)
+		// If VRF is enabled, we do not need to copy the rules from the host
+		// because the VRF handles the routing table lookup.
+		if deviceCfg.NetworkInterfaceConfigInPod.Interface.VRF == nil {
+			for _, table := range tables.UnsortedList() {
+				if rules, ok := rulesByTable[table]; ok {
+					klog.V(5).Infof("Adding %d rules for table %d associated with interface %s", len(rules), table, ifName)
+					deviceCfg.NetworkInterfaceConfigInPod.Rules = append(deviceCfg.NetworkInterfaceConfigInPod.Rules, rules...)
+					// Avoid adding the same rule twice
+					delete(rulesByTable, table)
+				}
 			}
 		}
 
@@ -337,49 +995,38 @@ func (np *NetworkDriver) prepareResourceClaim(ctx context.Context, claim *resour
 				Destination:  neigh.IP.String(),
 				HardwareAddr: neigh.HardwareAddr.String(),
 			}
-			podCfg.NetworkInterfaceConfigInPod.Neighbors = append(podCfg.NetworkInterfaceConfigInPod.Neighbors, neighCfg)
+			deviceCfg.NetworkInterfaceConfigInPod.Neighbors = append(deviceCfg.NetworkInterfaceConfigInPod.Neighbors, neighCfg)
 		}
 
 		// Get RDMA configuration: link and char devices
-		if rdmaDev, _ := rdmamap.GetRdmaDeviceForNetdevice(ifName); rdmaDev != "" {
+		if rdmaDev, err := inventory.GetRdmaDevice(ifName); err == nil && rdmaDev != "" {
 			klog.V(2).Infof("RunPodSandbox processing RDMA device: %s", rdmaDev)
-			podCfg.RDMADevice.LinkDev = rdmaDev
-			// Obtain the char devices associated to the rdma device
-			charDevices.Insert(rdmaCmPath)
-			charDevices.Insert(rdmamap.GetRdmaCharDevices(rdmaDev)...)
-			for _, devpath := range charDevices.UnsortedList() {
-				dev, err := GetDeviceInfo(devpath)
-				if err != nil {
-					klog.Infof("fail to get device info for %s : %v", devpath, err)
-				} else {
-					podCfg.RDMADevice.DevChars = append(podCfg.RDMADevice.DevChars, dev)
-				}
-			}
+			deviceCfg.RDMADevice = buildRDMAConfig(rdmaDev, charDevices)
 		}
 
 		// Remove the pinned programs before the NRI hooks since it
 		// has to walk the entire bpf virtual filesystem and is slow
 		// TODO: check if there is some other way to do this
-		if podCfg.NetworkInterfaceConfigInPod.Interface.DisableEBPFPrograms != nil &&
-			*podCfg.NetworkInterfaceConfigInPod.Interface.DisableEBPFPrograms {
+		if deviceCfg.NetworkInterfaceConfigInPod.Interface.DisableEBPFPrograms != nil &&
+			*deviceCfg.NetworkInterfaceConfigInPod.Interface.DisableEBPFPrograms {
 			err := unpinBPFPrograms(ifName)
 			if err != nil {
 				klog.Infof("error unpinning ebpf programs for %s : %v", ifName, err)
 			}
 		}
 
-		// TODO: support for multiple pods sharing the same device
-		// we'll create the subinterface here
-		for _, uid := range podUIDs {
-			np.podConfigStore.Set(uid, result.Device, podCfg)
+		if err := np.podConfigStore.SetDeviceConfig(podUID, result.Device, deviceCfg); err != nil {
+			errorList = append(errorList, fmt.Errorf("failed to persist device config for pod %s device %s: %v", podUID, result.Device, err))
 		}
-		klog.V(4).Infof("Claim Resources for pods %v : %#v", podUIDs, podCfg)
+		klog.V(4).Infof("Claim Resources for pod %s : %#v", podUID, deviceCfg)
 	}
 
 	if len(errorList) > 0 {
-		klog.Infof("claim %s contain errors: %v", claim.UID, errors.Join(errorList...))
+		joinedErr := errors.Join(errorList...)
+		klog.Infof("claim %s contain errors: %v", claim.UID, joinedErr)
+		np.eventRecorder.Eventf(claim, v1.EventTypeWarning, "ClaimPrepareFailed", "%v", joinedErr)
 		return kubeletplugin.PrepareResult{
-			Err: fmt.Errorf("claim %s contain errors: %w", claim.UID, errors.Join(errorList...)),
+			Err: fmt.Errorf("claim %s contain errors: %w", claim.UID, joinedErr),
 		}
 	}
 	return kubeletplugin.PrepareResult{}
@@ -429,7 +1076,29 @@ func (np *NetworkDriver) unprepareResourceClaims(ctx context.Context, claims []k
 }
 
 func (np *NetworkDriver) unprepareResourceClaim(_ context.Context, claim kubeletplugin.NamespacedObject) error {
+	for _, podUID := range np.podConfigStore.ListPods() {
+		podCfg, ok := np.podConfigStore.GetPodConfig(podUID)
+		if !ok {
+			continue
+		}
+		for deviceName, devCfg := range podCfg.DeviceConfigs {
+			if devCfg.Claim.Namespace == claim.Namespace && devCfg.Claim.Name == claim.Name {
+				if devCfg.NetworkInterfaceConfigInPod.Profile != "" {
+					if err := np.netdb.ReleaseProfileConfig(deviceName, claim.UID, &devCfg.NetworkInterfaceConfigInPod); err != nil {
+						klog.Errorf("failed to release profile config for claim %v: %v", claim.NamespacedName, err)
+					}
+				}
+			}
+		}
+	}
+
 	np.podConfigStore.DeleteClaim(claim.NamespacedName)
+	if np.secondaryNICStore != nil {
+		if err := np.secondaryNICStore.DeleteByClaim(claim.NamespacedName); err != nil {
+			return fmt.Errorf("delete persisted secondary NIC config for claim %s/%s: %w", claim.Namespace, claim.Name, err)
+		}
+	}
+	klog.V(2).Infof("UnprepareResourceClaim: cleaned up DRA and secondary NIC stores for claim %s/%s", claim.Namespace, claim.Name)
 	return nil
 }
 
@@ -450,6 +1119,35 @@ func formatDeviceNames(devices []resourceapi.Device, max int) string {
 	}
 
 	return fmt.Sprintf("%s, and %d more", strings.Join(deviceNames[:max], ", "), len(deviceNames)-max)
+}
+
+// buildRDMAConfig populates an RDMAConfig for the given rdma device name.
+// It inserts the rdma_cm and per-device character device paths into charDevices,
+// then resolves each path to a LinuxDevice entry.
+func buildRDMAConfig(rdmaDevName string, charDevices sets.Set[string]) RDMAConfig {
+	cfg := RDMAConfig{LinkDev: rdmaDevName}
+	charDevices.Insert(rdmaCmPath)
+	charDevices.Insert(rdmamap.GetRdmaCharDevices(rdmaDevName)...)
+	for _, devpath := range charDevices.UnsortedList() {
+		dev, err := GetDeviceInfo(devpath)
+		if err != nil {
+			klog.Infof("fail to get device info for %s : %v", devpath, err)
+		} else {
+			cfg.DevChars = append(cfg.DevChars, dev)
+		}
+	}
+	return cfg
+}
+
+// validateVFMTU returns an error if the MTU requested for an SR-IOV VF exceeds
+// the parent PF's MTU, which is an illegal configuration. vfName and pfName are
+// only used to build a descriptive error message.
+func validateVFMTU(vfName, pfName string, requestedMTU, pfMTU int) error {
+	if requestedMTU > pfMTU {
+		return fmt.Errorf("requested MTU %d for SR-IOV VF %s exceeds parent PF %s MTU %d",
+			requestedMTU, vfName, pfName, pfMTU)
+	}
+	return nil
 }
 
 // getRuleInfo lists all IP rules in the host network namespace and groups them
@@ -539,4 +1237,82 @@ func getRouteInfo(nlHandle nlwrap.Handle, ifName string, link netlink.Link) ([]a
 		}
 	}
 	return routes, tables, nil
+}
+
+// getDeviceNetworkConfig merges the user configuration with the cloud provider configuration and resolves the dynamic profile.
+// User configuration always takes precedence in case of conflicts.
+func (np *NetworkDriver) getDeviceNetworkConfig(device string, claimUID types.UID, userConf *apis.NetworkConfig) (*apis.NetworkConfig, error) {
+	cloudConf, ok := np.netdb.GetDeviceConfig(device)
+	if ok && cloudConf != nil {
+		klog.V(4).Infof("Found cloud provider configuration for device %s: %#v", device, cloudConf)
+	}
+	mergedConf := apis.MergeNetworkConfig(userConf, cloudConf)
+
+	if mergedConf.Profile != "" {
+		profileConf, err := np.netdb.GetProfileConfig(device, claimUID, mergedConf)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get profile config: %v", err)
+		}
+		mergedConf = apis.MergeNetworkConfig(mergedConf, profileConf)
+	}
+	return mergedConf, nil
+}
+
+// mergeDevices merges live host devices with database snapshots,
+// giving precedence to live attributes and capacities where they overlap.
+func mergeDevices(live, snapshot []resourceapi.Device) []resourceapi.Device {
+	merged := make(map[string]resourceapi.Device)
+
+	// 1. Initial Load from Host Scan (Live devices)
+	for _, dev := range live {
+		merged[dev.Name] = dev
+	}
+
+	// 2. Merge database snapshots
+	for _, dev := range snapshot {
+		liveDev, exists := merged[dev.Name]
+		if !exists {
+			// Device is completely missing from host (e.g. virtual interface in pod namespace).
+			// Use the snapshot as-is.
+			merged[dev.Name] = dev
+			continue
+		}
+
+		// Device is in both (e.g. physical device). Merge them, giving precedence to liveDev.
+		merged[dev.Name] = mergeDeviceStructs(liveDev, dev)
+	}
+
+	// 3. Convert map to sorted slice
+	result := make([]resourceapi.Device, 0, len(merged))
+	for _, dev := range merged {
+		result = append(result, dev)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Name < result[j].Name
+	})
+	return result
+}
+
+func mergeDeviceStructs(live, snap resourceapi.Device) resourceapi.Device {
+	merged := *live.DeepCopy()
+
+	if merged.Attributes == nil {
+		merged.Attributes = make(map[resourceapi.QualifiedName]resourceapi.DeviceAttribute)
+	}
+	for k, v := range snap.Attributes {
+		if _, exists := merged.Attributes[k]; !exists {
+			merged.Attributes[k] = *v.DeepCopy()
+		}
+	}
+
+	if merged.Capacity == nil {
+		merged.Capacity = make(map[resourceapi.QualifiedName]resourceapi.DeviceCapacity)
+	}
+	for k, v := range snap.Capacity {
+		if _, exists := merged.Capacity[k]; !exists {
+			merged.Capacity[k] = *v.DeepCopy()
+		}
+	}
+
+	return merged
 }

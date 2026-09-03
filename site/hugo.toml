@@ -15,7 +15,7 @@ hl_Lines = ""
 lineNoStart = 1
 lineNos = false
 lineNumbersInTable = true
-noClasses = true
+noClasses = false # Needed for dark mode theme switching
 style = "vs"
 tabWidth = 4
 
@@ -28,29 +28,34 @@ sectionPagesMenu = "main"
 # menu entries
 [menu]
 [[menu.main]]
-identifier = "home"
-name = "Home"
-title = "Home"
-url = "/docs"
+identifier = "documentation"
+name = "Documentation"
+title = "Documentation"
+url = "/docs/"
 weight = 1
+
 [[menu.main]]
-identifier = "user"
-url = "/docs/user"
-name = "User Guides"
-title = "User Guides"
+identifier = "quickstart"
+name = "Quick Start"
+title = "Quick Start"
+url = "/docs/quick-start/"
 weight = 2
+
+[[menu.main]]
+identifier = "userguide"
+name = "User Guide"
+title = "User Guide"
+url = "/docs/user/"
+weight = 3
+
 [[menu.main]]
 identifier = "concepts"
-url = "/docs/concepts"
 name = "Concepts"
 title = "Concepts"
-weight = 5
-[[menu.main]]
-identifier = "contributing"
-url = "/docs/contributing"
-name = "Contributing"
-title = "Contributing"
-weight = 6
+url = "/docs/concepts/"
+weight = 4
+
+
 
 [outputs]
 home = ["HTML"]
@@ -96,6 +101,7 @@ navbar_translucent_over_cover_disable = false
 sidebar_menu_compact = false
 # Set to true to hide the sidebar search box (the top nav search box will still be displayed if search is enabled)
 sidebar_search_disable = false
+showLightDarkModeMenu = true
 
 # Adds a reading time to the top of each doc.
 # If you want this feature, but occasionally need to remove the Reading time from a single page,

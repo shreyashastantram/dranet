@@ -1,0 +1,19 @@
+name: Helm Lint
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'deployments/helm/**'
+      - '.github/workflows/helm-lint.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  helm-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run Helm lint
+        run: make helm-lint

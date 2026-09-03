@@ -136,6 +136,12 @@ spec:
             memory: "50Mi"
         securityContext:
           privileged: true
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: 9177
+          failureThreshold: 12
+          periodSeconds: 5
         readinessProbe:
           httpGet:
             path: /healthz

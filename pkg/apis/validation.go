@@ -59,6 +59,9 @@ func ValidateConfig(raw *runtime.RawExtension) (*NetworkConfig, []error) {
 		}
 	}
 
+	// Apply defaults
+	config.Default()
+
 	// Validate InterfaceConfig
 	allErrors = append(allErrors, validateInterfaceConfig(&config.Interface, "interface")...)
 
@@ -69,7 +72,11 @@ func ValidateConfig(raw *runtime.RawExtension) (*NetworkConfig, []error) {
 
 	// Validate Rules
 	if len(config.Rules) > 0 {
-		allErrors = append(allErrors, validateRules(config.Rules, "rules")...)
+		if config.Interface.VRF != nil {
+			allErrors = append(allErrors, fmt.Errorf("rules are not supported when VRF is enabled"))
+		} else {
+			allErrors = append(allErrors, validateRules(config.Rules, "rules")...)
+		}
 	}
 
 	// Validate EthtoolConfig if present
@@ -170,7 +177,34 @@ func validateInterfaceConfig(cfg *InterfaceConfig, fieldPath string) (allErrors 
 		allErrors = append(allErrors, fmt.Errorf("%s.grov4MaxSize: must be positive, got %d", fieldPath, *cfg.GROIPv4MaxSize))
 	}
 
+	if cfg.VRF != nil {
+		allErrors = append(allErrors, validateVRFConfig(cfg.VRF, fieldPath+".vrf")...)
+	}
+
 	return allErrors
+}
+
+func validateVRFConfig(cfg *VRFConfig, fieldPath string) (allErrors []error) {
+	if cfg.Name == "" {
+		allErrors = append(allErrors, fmt.Errorf("%s.name: cannot be empty", fieldPath))
+	}
+
+	if cfg.Table != nil {
+		if *cfg.Table <= 0 {
+			allErrors = append(allErrors, fmt.Errorf("%s.table: must be a positive integer, got %d", fieldPath, *cfg.Table))
+		}
+		// Avoid reserved Linux routing tables
+		if *cfg.Table == 253 || *cfg.Table == 254 || *cfg.Table == 255 {
+			allErrors = append(allErrors, fmt.Errorf("%s.table: cannot use reserved table ID %d", fieldPath, *cfg.Table))
+		}
+	}
+
+	return allErrors
+}
+
+// sameIPFamily reports whether a and b are both IPv4 or both IPv6.
+func sameIPFamily(a, b net.IP) bool {
+	return (a.To4() != nil) == (b.To4() != nil)
 }
 
 // validateRoutes validates a slice of RouteConfig.
@@ -178,13 +212,19 @@ func validateRoutes(routes []RouteConfig, fieldPath string) (allErrors []error) 
 	for i, route := range routes {
 		currentFieldPath := fmt.Sprintf("%s[%d]", fieldPath, i)
 
+		// dstIP is retained so the gateway and source can be checked against the
+		// destination's IP family. The kernel (via netlink RouteAdd) rejects a
+		// route whose gateway or source is a different family than the destination,
+		// so validation rejects the mismatch here rather than letting it fail at
+		// apply time.
+		var dstIP net.IP
 		if route.Destination == "" {
 			allErrors = append(allErrors, fmt.Errorf("%s.destination: cannot be empty", currentFieldPath))
 		} else {
-			if _, _, err := net.ParseCIDR(route.Destination); err != nil {
-				if net.ParseIP(route.Destination) == nil {
-					allErrors = append(allErrors, fmt.Errorf("%s.destination: invalid IP or CIDR format '%s'", currentFieldPath, route.Destination))
-				}
+			if ip, _, err := net.ParseCIDR(route.Destination); err != nil {
+				allErrors = append(allErrors, fmt.Errorf("%s.destination: invalid CIDR format '%s' (host routes use /32 or /128)", currentFieldPath, route.Destination))
+			} else {
+				dstIP = ip
 			}
 		}
 
@@ -197,16 +237,22 @@ func validateRoutes(routes []RouteConfig, fieldPath string) (allErrors []error) 
 		}
 
 		if route.Gateway != "" {
-			if net.ParseIP(route.Gateway) == nil {
+			gwIP := net.ParseIP(route.Gateway)
+			if gwIP == nil {
 				allErrors = append(allErrors, fmt.Errorf("%s.gateway: invalid IP address format '%s'", currentFieldPath, route.Gateway))
+			} else if dstIP != nil && !sameIPFamily(dstIP, gwIP) {
+				allErrors = append(allErrors, fmt.Errorf("%s.gateway: '%s' must be the same IP family as destination '%s'", currentFieldPath, route.Gateway, route.Destination))
 			}
 		} else if !scopeIsLink { // Gateway is required if scope is Universe
 			allErrors = append(allErrors, fmt.Errorf("%s.gateway: must be specified for Universe scope routes", currentFieldPath))
 		}
 
 		if route.Source != "" {
-			if net.ParseIP(route.Source) == nil {
+			srcIP := net.ParseIP(route.Source)
+			if srcIP == nil {
 				allErrors = append(allErrors, fmt.Errorf("%s.source: invalid IP address format '%s'", currentFieldPath, route.Source))
+			} else if dstIP != nil && !sameIPFamily(dstIP, srcIP) {
+				allErrors = append(allErrors, fmt.Errorf("%s.source: '%s' must be the same IP family as destination '%s'", currentFieldPath, route.Source, route.Destination))
 			}
 		}
 
@@ -230,16 +276,28 @@ func validateRules(rules []RuleConfig, fieldPath string) (allErrors []error) {
 			allErrors = append(allErrors, fmt.Errorf("%s.table: must be a non-negative integer, got %d", currentFieldPath, rule.Table))
 		}
 
+		var srcIP, dstIP net.IP
 		if rule.Source != "" {
-			if _, _, err := net.ParseCIDR(rule.Source); err != nil {
+			if ip, _, err := net.ParseCIDR(rule.Source); err != nil {
 				allErrors = append(allErrors, fmt.Errorf("%s.source: invalid CIDR format '%s'", currentFieldPath, rule.Source))
+			} else {
+				srcIP = ip
 			}
 		}
 
 		if rule.Destination != "" {
-			if _, _, err := net.ParseCIDR(rule.Destination); err != nil {
+			if ip, _, err := net.ParseCIDR(rule.Destination); err != nil {
 				allErrors = append(allErrors, fmt.Errorf("%s.destination: invalid CIDR format '%s'", currentFieldPath, rule.Destination))
+			} else {
+				dstIP = ip
 			}
+		}
+
+		// The kernel (via netlink RuleAdd) rejects a rule whose source and
+		// destination are different IP families, so reject it here rather than
+		// letting it fail at apply time.
+		if srcIP != nil && dstIP != nil && !sameIPFamily(srcIP, dstIP) {
+			allErrors = append(allErrors, fmt.Errorf("%s: source '%s' and destination '%s' must be the same IP family", currentFieldPath, rule.Source, rule.Destination))
 		}
 	}
 	return allErrors
@@ -247,6 +305,45 @@ func validateRules(rules []RuleConfig, fieldPath string) (allErrors []error) {
 
 // validateEthtoolConfig validates the EthtoolConfig part of the NetworkConfig.
 func validateEthtoolConfig(cfg *EthtoolConfig, fieldPath string) (allErrors []error) {
+	return allErrors
+}
+
+// ValidateRDMAOnlyConfig checks that a NetworkConfig does not contain
+// network-specific fields that are meaningless (and unsupported) for an
+// RDMA-only device (i.e. a device with no network interface). Callers should
+// invoke this after confirming the allocated device has no ifName.
+func ValidateRDMAOnlyConfig(raw *runtime.RawExtension) []error {
+	if raw == nil || raw.Raw == nil || len(raw.Raw) == 0 {
+		return nil
+	}
+	var config NetworkConfig
+	var allErrors []error
+	strictErrs, err := json.UnmarshalStrict(raw.Raw, &config)
+	if err != nil {
+		return []error{fmt.Errorf("failed to unmarshal JSON data: %w", err)}
+	}
+	for _, e := range strictErrs {
+		allErrors = append(allErrors, fmt.Errorf("failed to unmarshal strict JSON data: %w", e))
+	}
+	if config.Interface.Name != "" || len(config.Interface.Addresses) > 0 ||
+		config.Interface.MTU != nil || config.Interface.HardwareAddr != nil ||
+		config.Interface.DHCP != nil || config.Interface.GSOMaxSize != nil ||
+		config.Interface.GROMaxSize != nil || config.Interface.GSOIPv4MaxSize != nil ||
+		config.Interface.GROIPv4MaxSize != nil || config.Interface.DisableEBPFPrograms != nil {
+		allErrors = append(allErrors, fmt.Errorf("interface configuration is not supported for RDMA-only devices (no network interface present)"))
+	}
+	if len(config.Routes) > 0 {
+		allErrors = append(allErrors, fmt.Errorf("routes are not supported for RDMA-only devices (no network interface present)"))
+	}
+	if len(config.Rules) > 0 {
+		allErrors = append(allErrors, fmt.Errorf("rules are not supported for RDMA-only devices (no network interface present)"))
+	}
+	if config.Ethtool != nil {
+		allErrors = append(allErrors, fmt.Errorf("ethtool configuration is not supported for RDMA-only devices (no network interface present)"))
+	}
+	if len(config.Neighbors) > 0 {
+		allErrors = append(allErrors, fmt.Errorf("neighbors are not supported for RDMA-only devices (no network interface present)"))
+	}
 	return allErrors
 }
 

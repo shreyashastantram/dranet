@@ -1,0 +1,131 @@
+apiVersion: v1
+items:
+- apiVersion: resource.k8s.io/v1
+  kind: ResourceSlice
+  metadata:
+    generateName: aks-gpu-45139532-vmss000081-gpu.nvidia.com-
+    name: aks-gpu-45139532-vmss000081-gpu.nvidia.com-27g7w
+    ownerReferences:
+    - apiVersion: v1
+      controller: true
+      kind: Node
+      name: aks-gpu-45139532-vmss000081
+      uid: 00c21858-73a7-402e-88bc-5e33b1d39bb7
+    uid: 54700765-803c-489c-8388-64efe891729c
+  spec:
+    devices:
+    - attributes:
+        addressingMode:
+          string: ATS
+        architecture:
+          string: Blackwell
+        brand:
+          string: Nvidia
+        cudaComputeCapability:
+          version: 10.3.0
+        cudaDriverVersion:
+          version: 13.0.0
+        driverVersion:
+          version: 580.105.8
+        productName:
+          string: NVIDIA GB300
+        resource.kubernetes.io/pciBusID:
+          string: "0008:06:00.0"
+        resource.kubernetes.io/pcieRoot:
+          string: pci0008:00
+        type:
+          string: gpu
+        uuid:
+          string: GPU-ad11da28-7944-0f37-addf-86beae05fed3
+      capacity:
+        memory:
+          value: 284208Mi
+      name: gpu-0
+    - attributes:
+        addressingMode:
+          string: ATS
+        architecture:
+          string: Blackwell
+        brand:
+          string: Nvidia
+        cudaComputeCapability:
+          version: 10.3.0
+        cudaDriverVersion:
+          version: 13.0.0
+        driverVersion:
+          version: 580.105.8
+        productName:
+          string: NVIDIA GB300
+        resource.kubernetes.io/pciBusID:
+          string: "0009:06:00.0"
+        resource.kubernetes.io/pcieRoot:
+          string: pci0009:00
+        type:
+          string: gpu
+        uuid:
+          string: GPU-5f0db007-2a7b-b1cc-f0e7-8096b046f488
+      capacity:
+        memory:
+          value: 284208Mi
+      name: gpu-1
+    - attributes:
+        addressingMode:
+          string: ATS
+        architecture:
+          string: Blackwell
+        brand:
+          string: Nvidia
+        cudaComputeCapability:
+          version: 10.3.0
+        cudaDriverVersion:
+          version: 13.0.0
+        driverVersion:
+          version: 580.105.8
+        productName:
+          string: NVIDIA GB300
+        resource.kubernetes.io/pciBusID:
+          string: "0018:06:00.0"
+        resource.kubernetes.io/pcieRoot:
+          string: pci0018:00
+        type:
+          string: gpu
+        uuid:
+          string: GPU-893a4f93-eef0-28c5-d6bb-327930c64501
+      capacity:
+        memory:
+          value: 284208Mi
+      name: gpu-2
+    - attributes:
+        addressingMode:
+          string: ATS
+        architecture:
+          string: Blackwell
+        brand:
+          string: Nvidia
+        cudaComputeCapability:
+          version: 10.3.0
+        cudaDriverVersion:
+          version: 13.0.0
+        driverVersion:
+          version: 580.105.8
+        productName:
+          string: NVIDIA GB300
+        resource.kubernetes.io/pciBusID:
+          string: "0019:06:00.0"
+        resource.kubernetes.io/pcieRoot:
+          string: pci0019:00
+        type:
+          string: gpu
+        uuid:
+          string: GPU-6a3c2cfe-c7b0-6f1a-365f-5e06dc652d96
+      capacity:
+        memory:
+          value: 284208Mi
+      name: gpu-3
+    driver: gpu.nvidia.com
+    nodeName: aks-gpu-45139532-vmss000081
+    pool:
+      name: aks-gpu-45139532-vmss000081
+      resourceSliceCount: 1
+kind: List
+metadata: {}

@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Mellanox/rdmamap"
 	"k8s.io/klog/v2"
 )
 
@@ -100,7 +101,91 @@ func sriovNumVFs(name string) int {
 	return t
 }
 
-// hasRDMADeviceInSysfs checks if a network interface has RDMA capability by
+// isSriovVf reports whether a network interface is a SR-IOV Virtual Function.
+// In sysfs this is exposed as a "physfn" symlink under the PCI device.
+func isSriovVf(name string, syspath string) bool {
+	physfnPath := filepath.Join(syspath, name, "device", "physfn")
+	info, err := os.Lstat(physfnPath)
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeSymlink != 0
+}
+
+// IsSriovVf reports whether a network interface is a SR-IOV Virtual Function.
+func IsSriovVf(name string) bool {
+	return isSriovVf(name, sysnetPath)
+}
+
+// getPFInterfaceNameFromSysfs returns the name of the Physical Function (PF) network
+// interface for a given SR-IOV Virtual Function (VF) interface, using basePath as the
+// root of the sysfs net directory (e.g. /sys/class/net). It returns an error if the
+// interface is not a VF or if the PF interface cannot be determined.
+func getPFInterfaceNameFromSysfs(basePath, vfName string) (string, error) {
+	pfNetPath := filepath.Join(basePath, vfName, "device", "physfn", "net")
+	entries, err := os.ReadDir(pfNetPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read PF net directory for VF %s: %w", vfName, err)
+	}
+	if len(entries) == 0 {
+		return "", fmt.Errorf("no PF interface found for VF %s", vfName)
+	}
+	return entries[0].Name(), nil
+}
+
+// GetPFInterfaceName returns the name of the Physical Function (PF) network interface
+// for a given SR-IOV Virtual Function (VF) interface. It returns an error if the
+// interface is not a VF or if the PF interface cannot be determined.
+func GetPFInterfaceName(vfName string) (string, error) {
+	return getPFInterfaceNameFromSysfs(sysnetPath, vfName)
+}
+
+// GetRdmaDevice returns the RDMA device name for a given network interface by
+// first checking GetRdmaDeviceForNetdevice. If rdmamap fails, it falls back to
+// checking the sysfs infiniband directory. This serves as a workaround for
+// cases where the rdmamap library fails to detect RDMA devices, particularly
+// for InfiniBand interfaces where the library incorrectly compares against the
+// node GUID instead of the port GUID.
+func GetRdmaDevice(ifName string) (string, error) {
+	if rdmaDev, _ := rdmamap.GetRdmaDeviceForNetdevice(ifName); rdmaDev != "" {
+		return rdmaDev, nil
+	}
+
+	// Fallback to sysfs check if rdmamap fails. This is particularly related to a known
+	// issue to detect RDMA devices for certain Mellanox NICs
+	// https://github.com/Mellanox/rdmamap/issues/15
+
+	rdmaDev, err := getRdmaDeviceFromSysfs(sysnetPath, ifName)
+	if err != nil {
+		return "", fmt.Errorf("no RDMA device found for %s: %w", ifName, err)
+	}
+
+	return rdmaDev, nil
+}
+
+// getRdmaDeviceFromSysfs function checks /sys/class/net/{ifname}/device/infiniband/ for any RDMA
+// device entries. If the directory exists and contains at least one entry,
+// it returns the name of the first RDMA device found.
+// If the directory does not exist or contains no entries, it returns an error indicating
+// that no RDMA device was found for the specified interface.
+
+func getRdmaDeviceFromSysfs(basePath, ifName string) (string, error) {
+	rdmaDir := filepath.Join(basePath, ifName, "device", "infiniband")
+	entries, err := os.ReadDir(rdmaDir)
+	if err != nil {
+		return "", fmt.Errorf("no RDMA device for %s: %w", ifName, err)
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			klog.V(4).Infof("Found RDMA device %s for interface %s via sysfs", entry.Name(), ifName)
+			return entry.Name(), nil // Return first RDMA device found (e.g., "mlx5_0")
+		}
+	}
+	return "", fmt.Errorf("no RDMA device found for %s", ifName)
+}
+
+// isRdmaDeviceInSysfs checks if a network interface has RDMA capability by
 // examining the sysfs infiniband directory. This serves as a workaround for
 // cases where the rdmamap library fails to detect RDMA devices, particularly
 // for InfiniBand interfaces where the library incorrectly compares against the
@@ -109,22 +194,16 @@ func sriovNumVFs(name string) int {
 // The function checks /sys/class/net/{ifname}/device/infiniband/ for any RDMA
 // device entries. If the directory exists and contains at least one entry, the
 // interface is considered RDMA-capable.
-func hasRDMADeviceInSysfs(ifName string) bool {
+func isRdmaDeviceInSysfs(ifName string) bool {
 	// Check if the infiniband directory exists under the device
-	ibPath := filepath.Join(sysnetPath, ifName, "device", "infiniband")
-	entries, err := os.ReadDir(ibPath)
+	rdmaName, err := getRdmaDeviceFromSysfs(sysnetPath, ifName)
 	if err != nil {
-		// Directory doesn't exist or can't be read
+		klog.V(4).Infof("No RDMA device found for interface %s via sysfs: %v", ifName, err)
 		return false
 	}
-	// If there's at least one entry (RDMA device), return true
-	for _, entry := range entries {
-		if entry.IsDir() {
-			klog.V(4).Infof("Found RDMA device %s for interface %s via sysfs", entry.Name(), ifName)
-			return true
-		}
-	}
-	return false
+
+	klog.V(4).Infof("Interface %s is RDMA-capable with device %s", ifName, rdmaName)
+	return true
 }
 
 // pciAddress BDF Notation
@@ -213,4 +292,22 @@ func pciAddressForNetInterface(ifName string) (*pciAddress, error) {
 		return nil, fmt.Errorf("could not find PCI address for interface %q: %w", ifName, err)
 	}
 	return address, nil
+}
+
+const sysInfinibandPath = "/sys/class/infiniband/"
+
+// pciAddressForRDMADevice resolves the PCI address for an RDMA device by
+// following the sysfs device symlink. For example, /sys/class/infiniband/erdma_0/device
+// resolves to a path containing the PCI BDF.
+func pciAddressForRDMADevice(basePath, rdmaDevName string) (*pciAddress, error) {
+	deviceLink := filepath.Join(basePath, rdmaDevName, "device")
+	resolved, err := filepath.EvalSymlinks(deviceLink)
+	if err != nil {
+		return nil, fmt.Errorf("could not resolve device symlink for %s: %w", rdmaDevName, err)
+	}
+	addr, err := pciAddressFromPath(resolved)
+	if err != nil {
+		return nil, fmt.Errorf("could not find PCI address for RDMA device %s at %s: %w", rdmaDevName, resolved, err)
+	}
+	return addr, nil
 }

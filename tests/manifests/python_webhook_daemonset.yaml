@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: python-webhook
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: python-webhook
+  template:
+    metadata:
+      labels:
+        app: python-webhook
+    spec:
+      hostNetwork: true
+      tolerations:
+      - operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: webhook
+        image: python:3-alpine
+        command: ["python3", "/usr/local/bin/webhook.py", "--port=8081"]
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8081
+          initialDelaySeconds: 1
+          periodSeconds: 2
+        volumeMounts:
+        - name: script
+          mountPath: /usr/local/bin/webhook.py
+          subPath: webhook.py
+      volumes:
+      - name: script
+        configMap:
+          name: python-webhook-script
+          defaultMode: 0777

@@ -65,6 +65,15 @@ rules:
     verbs:
       - patch
       - update
+  - apiGroups:
+      - "resource.k8s.io"
+    resources:
+      - resourceclaims/driver
+    verbs:
+      - associated-node:patch
+      - associated-node:update
+    resourceNames:
+      - dra.net
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
@@ -151,6 +160,12 @@ spec:
         securityContext:
           capabilities:
             add: ["NET_ADMIN", "SYS_ADMIN"]
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: 9177
+          failureThreshold: 12
+          periodSeconds: 5
         readinessProbe:
           httpGet:
             path: /healthz

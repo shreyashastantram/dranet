@@ -1,0 +1,38 @@
+# Unaligned: GPU and EFA may be allocated on different PCIe root complexes
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: gpu-efa-unaligned
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpu
+        exactly:
+          deviceClassName: gpu.nvidia.com
+          count: 1
+      - name: efa
+        exactly:
+          deviceClassName: efa.networking.k8s.aws
+          count: 1
+---
+# Aligned: GPU and EFA are co-located on the same PCIe root complex
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: gpu-efa-aligned
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpu
+        exactly:
+          deviceClassName: gpu.nvidia.com
+          count: 1
+      - name: efa
+        exactly:
+          deviceClassName: efa.networking.k8s.aws
+          count: 1
+      constraints:
+      - requests: [gpu, efa]
+        matchAttribute: resource.kubernetes.io/pcieRoot

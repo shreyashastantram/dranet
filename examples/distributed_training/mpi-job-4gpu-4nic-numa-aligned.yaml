@@ -1,0 +1,85 @@
+apiVersion: kubeflow.org/v2beta1
+kind: MPIJob
+metadata:
+  name: pytorch-nccl-mfu-4gpu-aligned
+spec:
+  slotsPerWorker: 4
+  sshAuthMountPath: /root/.ssh
+  mpiReplicaSpecs:
+    Launcher:
+      replicas: 1
+      template:
+        spec:
+          automountServiceAccountToken: false
+          containers:
+          - name: pytorch
+            image: nvcr.io/nvidia/pytorch:25.10-py3
+            command: ["bash", "/workspace/benchmark/launcher-4gpu.sh"]
+            env:
+            - name: MFU_RUN_LABEL
+              value: "aligned"
+            - name: MFU_GPUS_PER_WORKER
+              value: "4"
+            - name: MFU_BATCH_SIZE
+              value: "4096"
+            - name: MFU_HIDDEN_SIZE
+              value: "8192"
+            - name: MFU_LAYERS
+              value: "12"
+            - name: MFU_WARMUP_STEPS
+              value: "5"
+            - name: MFU_STEPS
+              value: "20"
+            - name: GPU_PEAK_TFLOPS
+              value: "989"
+            volumeMounts:
+            - name: benchmark
+              mountPath: /workspace/benchmark
+          volumes:
+          - name: benchmark
+            configMap:
+              name: pytorch-nccl-mfu-benchmark
+    Worker:
+      replicas: 2
+      template:
+        spec:
+          affinity:
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector:
+                  matchLabels:
+                    training.kubeflow.org/job-name: pytorch-nccl-mfu-4gpu-aligned
+                    training.kubeflow.org/job-role: worker
+                topologyKey: kubernetes.io/hostname
+          automountServiceAccountToken: false
+          resourceClaims:
+          - name: gpu-nic
+            resourceClaimTemplateName: h100-4gpu-4nic-numa-aligned
+          containers:
+          - name: pytorch
+            image: nvcr.io/nvidia/pytorch:25.10-py3
+            command: ["bash", "/workspace/benchmark/worker-sshd.sh"]
+            resources:
+              claims:
+              - name: gpu-nic
+            securityContext:
+              capabilities:
+                add:
+                - IPC_LOCK
+            volumeMounts:
+            - name: benchmark
+              mountPath: /workspace/benchmark
+            - name: shm
+              mountPath: /dev/shm
+          volumes:
+          - name: benchmark
+            configMap:
+              name: pytorch-nccl-mfu-benchmark
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 64Gi
+          tolerations:
+          - key: "nvidia.com/gpu"
+            operator: "Exists"
+            effect: "NoSchedule"

@@ -1,0 +1,74 @@
+apiVersion: kubeflow.org/v2beta1
+kind: MPIJob
+metadata:
+  name: nccl-test-dra
+spec:
+  slotsPerWorker: 8
+  sshAuthMountPath: /root/.ssh
+  mpiReplicaSpecs:
+    Launcher:
+      replicas: 1
+      template:
+        spec:
+          containers:
+          - name: rccl
+            image: maja/rccl-tests:rocm-7.0.2-gfx942
+            command: ["/bin/bash", "-c"]
+            args:
+            - |
+              sleep 60
+              mpirun -np 16 \
+                --allow-run-as-root \
+                -bind-to none \
+                -mca plm_rsh_args "-o StrictHostKeyChecking=no" \
+                -x LD_LIBRARY_PATH=/workspace/rccl/install/lib:/opt/rocm/lib \
+                -x NCCL_DEBUG=WARN \
+                -x NCCL_SOCKET_IFNAME=eth0 \
+                -x NCCL_IB_HCA=mlx5 \
+                -x NCCL_DMABUF_ENABLE=1 \
+                -x RCCL_MSCCL_ENABLE=0 \
+                /workspace/rccl-tests/build/all_reduce_perf -b 2G -e 32G -f 2 -g 1 -c 0
+    Worker:
+      replicas: 2
+      template:
+        spec:
+          affinity:
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector:
+                  matchLabels:
+                    training.kubeflow.org/job-name: nccl-test-dra
+                    training.kubeflow.org/job-role: worker
+                topologyKey: kubernetes.io/hostname
+          automountServiceAccountToken: false
+          resourceClaims:
+          - name: rdma-nics
+            resourceClaimTemplateName: 8nic-all
+          containers:
+          - name: rccl
+            image: maja/rccl-tests:rocm-7.0.2-gfx942
+            command: ["/bin/sh", "-c"]
+            args:
+            - |
+              mkdir -p /run/sshd
+              echo "StrictModes no" >> /etc/ssh/sshd_config
+              exec /usr/sbin/sshd -De
+            resources:
+              limits:
+                amd.com/gpu: 8
+              requests:
+                amd.com/gpu: 8
+              claims:
+              - name: rdma-nics
+            securityContext:
+              capabilities:
+                add:
+                - IPC_LOCK
+            volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+          volumes:
+          - name: dshm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi

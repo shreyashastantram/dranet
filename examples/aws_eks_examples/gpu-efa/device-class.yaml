@@ -1,0 +1,14 @@
+# DeviceClass installed by the aws-dranet Helm chart
+# (https://github.com/aws/eks-charts/tree/master/stable/aws-dranet).
+# Included here for reference. Installing the chart creates this object
+# automatically; you do not need to apply this file separately.
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: efa.networking.k8s.aws
+spec:
+  selectors:
+  - cel:
+      expression: |
+        device.driver == "dra.net" &&
+        device.attributes["dra.net"].pciDevice == 'Elastic Fabric Adapter (EFA)'

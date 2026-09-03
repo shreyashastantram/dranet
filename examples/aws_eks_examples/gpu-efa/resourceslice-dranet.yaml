@@ -1,0 +1,209 @@
+apiVersion: v1
+items:
+- apiVersion: resource.k8s.io/v1
+  kind: ResourceSlice
+  metadata:
+    generateName: ip-192-168-153-160.ec2.internal-dra.net-
+    name: ip-192-168-153-160.ec2.internal-dra.net-zskw8
+    ownerReferences:
+    - apiVersion: v1
+      controller: true
+      kind: Node
+      name: ip-192-168-153-160.ec2.internal
+  spec:
+    devices:
+    - attributes:
+        dra.net/numaNode:
+          int: 0
+        dra.net/pciAddress:
+          string: '0000:10:1b.0'
+        dra.net/pciDevice:
+          string: Elastic Fabric Adapter (EFA)
+        dra.net/pciSubsystem:
+          string: efa0
+        dra.net/pciVendor:
+          string: Amazon.com, Inc.
+        dra.net/rdma:
+          bool: true
+        dra.net/rdmaDevice:
+          string: rdmap16s27
+        resource.kubernetes.io/pcieRoot:
+          string: pci0000:10
+      name: pci-0000-10-1b-0
+    - attributes:
+        dra.net/alias:
+          string: ''
+        dra.net/ebpf:
+          bool: false
+        dra.net/encapsulation:
+          string: ether
+        dra.net/ifName:
+          string: ens65
+        dra.net/ipv4:
+          string: 192.168.155.224/19
+        dra.net/mac:
+          string: 0e:96:fe:e8:a3:f5
+        dra.net/mtu:
+          int: 9001
+        dra.net/numaNode:
+          int: 0
+        dra.net/pciAddress:
+          string: '0000:20:01.0'
+        dra.net/pciDevice:
+          string: Elastic Network Adapter (ENA)
+        dra.net/pciSubsystem:
+          string: ec20
+        dra.net/pciVendor:
+          string: Amazon.com, Inc.
+        dra.net/rdma:
+          bool: false
+        dra.net/sriov:
+          bool: false
+        dra.net/state:
+          string: up
+        dra.net/type:
+          string: device
+        dra.net/virtual:
+          bool: false
+        resource.kubernetes.io/pcieRoot:
+          string: pci0000:20
+      name: pci-0000-20-01-0
+    - attributes:
+        dra.net/numaNode:
+          int: 0
+        dra.net/pciAddress:
+          string: '0000:20:1b.0'
+        dra.net/pciDevice:
+          string: Elastic Fabric Adapter (EFA)
+        dra.net/pciSubsystem:
+          string: efa0
+        dra.net/pciVendor:
+          string: Amazon.com, Inc.
+        dra.net/rdma:
+          bool: true
+        dra.net/rdmaDevice:
+          string: rdmap32s27
+        resource.kubernetes.io/pcieRoot:
+          string: pci0000:20
+      name: pci-0000-20-1b-0
+    - attributes:
+        dra.net/alias:
+          string: ''
+        dra.net/ebpf:
+          bool: false
+        dra.net/encapsulation:
+          string: ether
+        dra.net/ifName:
+          string: ens129
+        dra.net/ipv4:
+          string: 192.168.144.206/19
+        dra.net/mac:
+          string: 0e:3e:8a:cc:9f:b3
+        dra.net/mtu:
+          int: 9001
+        dra.net/numaNode:
+          int: 1
+        dra.net/pciAddress:
+          string: '0000:90:01.0'
+        dra.net/pciDevice:
+          string: Elastic Network Adapter (ENA)
+        dra.net/pciSubsystem:
+          string: ec20
+        dra.net/pciVendor:
+          string: Amazon.com, Inc.
+        dra.net/rdma:
+          bool: false
+        dra.net/sriov:
+          bool: false
+        dra.net/state:
+          string: up
+        dra.net/type:
+          string: device
+        dra.net/virtual:
+          bool: false
+        resource.kubernetes.io/pcieRoot:
+          string: pci0000:90
+      name: pci-0000-90-01-0
+    - attributes:
+        dra.net/numaNode:
+          int: 1
+        dra.net/pciAddress:
+          string: '0000:90:1b.0'
+        dra.net/pciDevice:
+          string: Elastic Fabric Adapter (EFA)
+        dra.net/pciSubsystem:
+          string: efa0
+        dra.net/pciVendor:
+          string: Amazon.com, Inc.
+        dra.net/rdma:
+          bool: true
+        dra.net/rdmaDevice:
+          string: rdmap144s27
+        resource.kubernetes.io/pcieRoot:
+          string: pci0000:90
+      name: pci-0000-90-1b-0
+    - attributes:
+        dra.net/alias:
+          string: ''
+        dra.net/ebpf:
+          bool: false
+        dra.net/encapsulation:
+          string: ether
+        dra.net/ifName:
+          string: ens161
+        dra.net/ipv4:
+          string: 192.168.146.128/19
+        dra.net/mac:
+          string: 0e:0b:90:44:2f:6f
+        dra.net/mtu:
+          int: 9001
+        dra.net/numaNode:
+          int: 1
+        dra.net/pciAddress:
+          string: '0000:a0:01.0'
+        dra.net/pciDevice:
+          string: Elastic Network Adapter (ENA)
+        dra.net/pciSubsystem:
+          string: ec20
+        dra.net/pciVendor:
+          string: Amazon.com, Inc.
+        dra.net/rdma:
+          bool: false
+        dra.net/sriov:
+          bool: false
+        dra.net/state:
+          string: up
+        dra.net/type:
+          string: device
+        dra.net/virtual:
+          bool: false
+        resource.kubernetes.io/pcieRoot:
+          string: pci0000:a0
+      name: pci-0000-a0-01-0
+    - attributes:
+        dra.net/numaNode:
+          int: 1
+        dra.net/pciAddress:
+          string: '0000:a0:1b.0'
+        dra.net/pciDevice:
+          string: Elastic Fabric Adapter (EFA)
+        dra.net/pciSubsystem:
+          string: efa0
+        dra.net/pciVendor:
+          string: Amazon.com, Inc.
+        dra.net/rdma:
+          bool: true
+        dra.net/rdmaDevice:
+          string: rdmap160s27
+        resource.kubernetes.io/pcieRoot:
+          string: pci0000:a0
+      name: pci-0000-a0-1b-0
+    driver: dra.net
+    nodeName: ip-192-168-153-160.ec2.internal
+    pool:
+      generation: 1
+      name: ip-192-168-153-160.ec2.internal
+      resourceSliceCount: 1
+kind: List
+metadata:
+  resourceVersion: ''

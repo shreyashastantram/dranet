@@ -1,5 +1,5 @@
 # Stage 1: Builder
-FROM nvidia/cuda:13.1.1-devel-ubuntu24.04 AS builder
+FROM nvidia/cuda:13.3.0-devel-ubuntu24.04 AS builder
 
 # Set environment variables for non-interactive apt-get installs
 ENV DEBIAN_FRONTEND=noninteractive
@@ -51,7 +51,7 @@ WORKDIR /usr/src/nccl-tests
 RUN make -j$(nproc) MPI=1 MPI_HOME=/opt/openmpi
 
 # Stage 2: Runtime
-FROM nvidia/cuda:13.1.1-runtime-ubuntu24.04 AS runtime
+FROM nvidia/cuda:13.3.0-runtime-ubuntu24.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -80,7 +80,7 @@ RUN apt-get update && \
 # mpi-operator mounts the .ssh folder from a Secret. For that to work, we need
 # https://github.com/kubeflow/mpi-operator/issues/580
 ARG port=2222
-# Add priviledge separation directoy to run sshd as root.
+# Add privilege separation directory to run sshd as root.
 RUN mkdir -p /var/run/sshd
 # Add capability to run sshd as non-root.
 RUN setcap CAP_NET_BIND_SERVICE=+eip /usr/sbin/sshd

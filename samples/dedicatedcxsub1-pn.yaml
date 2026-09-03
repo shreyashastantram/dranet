@@ -1,0 +1,9 @@
+apiVersion: multitenancy.acn.azure.com/v1alpha1
+kind: PodNetwork
+metadata:
+    name: dedicatedcxsub1-pn
+spec:
+    networkID: 9b9d4ab4-4ed8-4bfa-99b4-ce9d29f730f0
+    deviceType: "acn.azure.com/vnet-nic"
+    subnetGUID: "b3fb9c7a-c237-4188-ba6e-cdd177db43d5"
+    subnetResourceID: /subscriptions/37deca37-c375-4a14-b90a-043849bd2bf1/resourceGroups/poddensityeuap/providers/Microsoft.Network/virtualNetworks/customervnet/subnets/dedicatedcxsub1

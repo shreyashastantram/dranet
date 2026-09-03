@@ -21,27 +21,30 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/google/cel-go/cel"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/dranet/pkg/apis"
+	"sigs.k8s.io/dranet/pkg/cnsclient"
 	"sigs.k8s.io/dranet/pkg/inventory"
 
 	"github.com/containerd/nri/pkg/stub"
 	"sigs.k8s.io/dranet/internal/nlwrap"
 
+	v1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
 	"k8s.io/klog/v2"
 	registerapi "k8s.io/kubelet/pkg/apis/pluginregistration/v1"
-)
-
-const (
-	kubeletPluginRegistryPath = "/var/lib/kubelet/plugins_registry"
-	kubeletPluginPath         = "/var/lib/kubelet/plugins"
+	"k8s.io/utils/clock"
 )
 
 const (
@@ -60,11 +63,14 @@ type pluginHelper interface {
 type inventoryDB interface {
 	Run(context.Context) error
 	GetResources(context.Context) <-chan []resourceapi.Device
+	GetDevice(deviceName string) (resourceapi.Device, bool)
 	GetNetInterfaceName(string) (string, error)
+	IsIBOnlyDevice(deviceName string) bool
+	GetRDMADeviceName(deviceName string) (string, error)
 	GetDeviceConfig(deviceName string) (*apis.NetworkConfig, bool)
-	AddPodNetNs(podKey string, netNs string)
-	RemovePodNetNs(podKey string)
-	GetPodNetNs(podKey string) (netNs string)
+	RequestRescan()
+	GetProfileConfig(deviceName string, claimUID types.UID, config *apis.NetworkConfig) (*apis.NetworkConfig, error)
+	ReleaseProfileConfig(deviceName string, claimUID types.UID, config *apis.NetworkConfig) error
 }
 
 // WithFilter
@@ -81,20 +87,83 @@ func WithInventory(db inventoryDB) Option {
 	}
 }
 
+// WithDBPath sets the path for the persistent pod config database.
+// If not set, an in-memory store is used.
+func WithDBPath(path string) Option {
+	return func(o *NetworkDriver) {
+		o.dbPath = path
+	}
+}
+
+// WithSecondaryNICDBPath sets the path for the persistent secondary NIC config database.
+// If not set, the secondary NIC store remains in memory.
+func WithSecondaryNICDBPath(path string) Option {
+	return func(o *NetworkDriver) {
+		o.secondaryNICDBPath = path
+	}
+}
+
+// WithKubeletRootDir sets the kubelet data directory (its --root-dir). The
+// driver's registration socket lives under <dir>/plugins_registry and its
+// dra.sock under <dir>/plugins. Set this when the kubelet runs with a
+// non-default --root-dir.
+func WithKubeletRootDir(dir string) Option {
+	return func(o *NetworkDriver) {
+		o.kubeletRootDir = dir
+	}
+}
+
+// WithCNSClient sets the CNS HTTP client for Azure NIC resource discovery.
+func WithCNSClient(client *cnsclient.Client) Option {
+	return func(o *NetworkDriver) {
+		o.cnsClient = client
+	}
+}
+
+// WithCNSDriverName sets the DRA driver name used for CNS resource publishing.
+func WithCNSDriverName(name string) Option {
+	return func(o *NetworkDriver) {
+		o.cnsDriverName = name
+	}
+}
+
 type NetworkDriver struct {
-	driverName string
-	nodeName   string
-	kubeClient kubernetes.Interface
-	draPlugin  pluginHelper
-	nriPlugin  stub.Stub
+	draPlugin     pluginHelper
+	driverName    string
+	eventRecorder record.EventRecorder
+	nodeName      string
+	nriPlugin     stub.Stub
+	kubeClient    kubernetes.Interface
+	cnsDriverName string
+	cnsPlugin     pluginHelper // separate kubelet plugin for CNS resources
 
 	// contains the host interfaces
 	netdb      inventoryDB
 	celProgram cel.Program
 
+	// CNS client for Azure NIC resource discovery
+	cnsClient *cnsclient.Client
+
+	// mu protects inventoryPools and lastCNSNICs for concurrent publishing
+	mu             sync.Mutex
+	inventoryPools map[string]resourceslice.Pool
+	lastCNSNICs    []cnsclient.NICResource
+
 	// Cache the rdma shared mode state
-	rdmaSharedMode bool
-	podConfigStore *PodConfigStore
+	rdmaSharedMode     bool
+	podConfigStore     *PodConfigStore
+	dbPath             string // path for persistent bbolt database; empty means in-memory
+	secondaryNICDBPath string
+
+	// kubeletRootDir is the kubelet data directory (its --root-dir). Set when the
+	// kubelet runs with a non-default --root-dir.
+	kubeletRootDir string
+
+	clock clock.WithTicker // Injectable clock for testing
+
+	// secondary NIC-specific pod config store for NRI plugin lookups.
+	// Populated during PrepareResourceClaims, read during NRI RunPodSandbox.
+	secondaryNICStore *SecondaryNICPodConfigStore
 }
 
 type Option func(*NetworkDriver)
@@ -110,28 +179,79 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 		klog.Infof("RDMA subsystem in mode: %s", rdmaNetnsMode)
 	}
 
+	eventBroadcaster := record.NewBroadcaster()
+	eventBroadcaster.StartStructuredLogging(0)
+	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: kubeClient.CoreV1().Events("")})
+	eventRecorder := eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: driverName, Host: nodeName})
+
 	plugin := &NetworkDriver{
 		driverName:     driverName,
 		nodeName:       nodeName,
 		kubeClient:     kubeClient,
 		rdmaSharedMode: rdmaNetnsMode == apis.RdmaNetnsModeShared,
-		podConfigStore: NewPodConfigStore(),
+		clock:          clock.RealClock{},
+		eventRecorder:  eventRecorder,
 	}
 
 	for _, o := range opts {
 		o(plugin)
 	}
 
-	driverPluginPath := filepath.Join(kubeletPluginPath, driverName)
+	// Initialize the pod config store with optional bbolt checkpoint backend.
+	var checkpointer Checkpointer
+	if plugin.dbPath != "" {
+		var err error
+		checkpointer, err = newBoltCheckpointer(plugin.dbPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open pod config database at %s: %v", plugin.dbPath, err)
+		}
+	}
+	store, err := NewPodConfigStore(checkpointer)
+	if err != nil {
+		if checkpointer != nil {
+			checkpointer.Close()
+		}
+		return nil, fmt.Errorf("failed to initialize pod config store: %v", err)
+	}
+	plugin.podConfigStore = store
+
+	var secondaryNICCheckpointer SecondaryNICCheckpointer
+	if plugin.secondaryNICDBPath != "" {
+		secondaryNICCheckpointer, err = newSecondaryNICBoltCheckpointer(plugin.secondaryNICDBPath)
+		if err != nil {
+			if secondaryNICCheckpointer != nil {
+				secondaryNICCheckpointer.Close()
+			}
+			plugin.podConfigStore.Close()
+			return nil, fmt.Errorf("failed to open secondary NIC config database at %s: %v", plugin.secondaryNICDBPath, err)
+		}
+	}
+	secondaryNICStore, err := newSecondaryNICPodConfigStore(secondaryNICCheckpointer)
+	if err != nil {
+		if secondaryNICCheckpointer != nil {
+			secondaryNICCheckpointer.Close()
+		}
+		plugin.podConfigStore.Close()
+		return nil, fmt.Errorf("failed to initialize secondary NIC config store: %v", err)
+	}
+	plugin.secondaryNICStore = secondaryNICStore
+
+	driverPluginPath := filepath.Join(plugin.kubeletRootDir, "plugins", driverName)
 	err = os.MkdirAll(driverPluginPath, 0750)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create plugin path %s: %v", driverPluginPath, err)
 	}
 
+	// Derive the registration and plugin data directories from the kubelet root
+	// dir so they are correct when the kubelet uses a non-default --root-dir. At
+	// the default this matches the kubeletplugin defaults, so existing deployments
+	// are unaffected.
 	kubeletOpts := []kubeletplugin.Option{
 		kubeletplugin.DriverName(driverName),
 		kubeletplugin.NodeName(nodeName),
 		kubeletplugin.KubeClient(kubeClient),
+		kubeletplugin.RegistrarDirectoryPath(filepath.Join(plugin.kubeletRootDir, "plugins_registry")),
+		kubeletplugin.PluginDataDirectoryPath(driverPluginPath),
 	}
 	d, err := kubeletplugin.Start(ctx, plugin, kubeletOpts...)
 	if err != nil {
@@ -167,9 +287,9 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 
 	go func() {
 		for i := 0; i < maxAttempts; i++ {
-			err = plugin.nriPlugin.Run(ctx)
-			if err != nil {
-				klog.Infof("NRI plugin failed with error %v", err)
+			runErr := plugin.nriPlugin.Run(ctx)
+			if runErr != nil {
+				klog.Infof("NRI plugin failed with error %v", runErr)
 			}
 			select {
 			case <-ctx.Done():
@@ -183,13 +303,14 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 
 	// register the host network interfaces
 	if plugin.netdb == nil {
+		klog.Info("netdb is not initialized. init-ing now")
 		plugin.netdb = inventory.New()
 	}
 	go func() {
 		for i := 0; i < maxAttempts; i++ {
-			err = plugin.netdb.Run(ctx)
-			if err != nil {
-				klog.Infof("Network Device DB failed with error %v", err)
+			runErr := plugin.netdb.Run(ctx)
+			if runErr != nil {
+				klog.Infof("Network Device DB failed with error %v", runErr)
 			}
 			select {
 			case <-ctx.Done():
@@ -201,15 +322,179 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 		klog.Fatalf("Network Device DB failed for %d times to be restarted", maxAttempts)
 	}()
 
-	// publish available resources
-	go plugin.PublishResources(ctx)
+	// Prefix-on-NIC resources are published through the CNS plugin below. Keep the
+	// generic dra.net publisher disabled to avoid exposing a second set of devices.
+	// go plugin.PublishResources(ctx)
+
+	// Start a separate kubelet plugin for CNS resources if configured
+	if plugin.cnsClient != nil && plugin.cnsDriverName != "" {
+		cnsPluginPath := filepath.Join(plugin.kubeletRootDir, "plugins", plugin.cnsDriverName)
+		err = os.MkdirAll(cnsPluginPath, 0o750)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create CNS plugin path %s: %v", cnsPluginPath, err)
+		}
+
+		cnsOpts := []kubeletplugin.Option{
+			kubeletplugin.DriverName(plugin.cnsDriverName),
+			kubeletplugin.NodeName(nodeName),
+			kubeletplugin.KubeClient(kubeClient),
+			kubeletplugin.RegistrarDirectoryPath(filepath.Join(plugin.kubeletRootDir, "plugins_registry")),
+			kubeletplugin.PluginDataDirectoryPath(cnsPluginPath),
+		}
+		cnsD, err := kubeletplugin.Start(ctx, plugin, cnsOpts...)
+		if err != nil {
+			return nil, fmt.Errorf("start CNS kubelet plugin: %w", err)
+		}
+		plugin.cnsPlugin = cnsD
+		err = wait.PollUntilContextTimeout(ctx, 1*time.Second, 30*time.Second, true, func(context.Context) (bool, error) {
+			status := plugin.cnsPlugin.RegistrationStatus()
+			if status == nil {
+				return false, nil
+			}
+			return status.PluginRegistered, nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("CNS kubelet plugin registration failed: %w", err)
+		}
+		klog.Infof("CNS kubelet plugin registered as %s", plugin.cnsDriverName)
+		go plugin.PublishCNSResources(ctx)
+	} else if plugin.cnsClient != nil {
+		klog.Info("CNS client configured but no CNS driver name set, skipping CNS resource publishing")
+	} else {
+		klog.Info("CNS client not configured, skipping CNS resource discovery and publishing")
+	}
 
 	return plugin, nil
 }
 
-func (np *NetworkDriver) Stop() {
-	// Stop NRI Plugin (it's expected that it returns when fully stopped).
-	np.nriPlugin.Stop()
-	// Stop DRA Plugin (returns only after it has fully stopped).
+// Stop handles the graceful termination of the Network Driver by coordinating
+// the shutdown of its DRA and NRI plugin components.
+//
+// The shutdown follows a specific sequence to prevent workload pods from starting
+// without their required devices during driver restarts or upgrades:
+//
+//  1. First, it shuts down the DRA plugin. This stops the driver from accepting
+//     new resource claims and from preparing new pods.
+//  2. Next, it enters a wait-loop to ensure that all pods currently in the
+//     process of being prepared have a chance to hit their NRI hooks and finish
+//     initialization.
+//     - It tracks the most recent NRI activity for each prepared pod.
+//     - It waits for a grace period (e.g., 10s) after the last activity for any
+//     pod, ensuring subsequent containers in the same pod (like sidecars or
+//     main app containers) also have a chance to be processed.
+//     - The loop has a fallback timeout (e.g., 5m) to prevent the driver from
+//     hanging indefinitely. However, in practice, the Kubernetes
+//     terminationGracePeriodSeconds of the driver's own Pod (defaulting to
+//     30s) will likely kill the driver before this fallback timeout is
+//     reached.
+//  3. Finally, it cancels the top-level context and stops the NRI plugin stub.
+func (np *NetworkDriver) Stop(ctxCancel context.CancelFunc) {
+	klog.Info("Stopping driver...")
+
+	// Step 1: Halt the DRA plugin.
+	// This stops the driver from handling new NodePrepareResources requests,
+	// stabilizing the set of pods that require NRI processing.
+	// Stop the CNS plugin at the same boundary so it also stops accepting claims.
+	if np.cnsPlugin != nil {
+		np.cnsPlugin.Stop()
+	}
 	np.draPlugin.Stop()
+
+	// Step 2: Wait for prepared pods to finish NRI initialization.
+	gracePeriod := 10 * time.Second
+	pollInterval := 5 * time.Second
+	fallbackTimeout := 5 * time.Minute
+	ticker := np.clock.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	// defaultPreviousActivity is used as a baseline for pods that have been
+	// prepared but haven't recorded any NRI activity yet.
+	defaultPreviousActivity := np.clock.Now()
+
+	for {
+		done := func() bool {
+			// Check if we've exceeded the absolute maximum time we're willing to wait.
+			if np.clock.Since(defaultPreviousActivity) >= fallbackTimeout {
+				klog.Warningf("Fallback timeout of %v reached. Proceeding with shutdown despite pending pods.", fallbackTimeout)
+				return true
+			}
+
+			// Get the current set of prepared pods and their latest NRI activity timestamps.
+			activities := np.podConfigStore.GetPodNRIActivities()
+			if np.secondaryNICStore != nil {
+				for podUID, secondaryActivity := range np.secondaryNICStore.GetPodNRIActivities() {
+					activity, found := activities[podUID]
+					switch {
+					case !found:
+						activities[podUID] = secondaryActivity
+					case activity.IsZero() || secondaryActivity.IsZero():
+						// A zero value in either store means one prepared device path
+						// has not yet been observed by NRI in this process.
+						activities[podUID] = time.Time{}
+					case secondaryActivity.After(activity):
+						activities[podUID] = secondaryActivity
+					}
+				}
+			}
+			pendingCount := len(activities)
+			if pendingCount == 0 {
+				klog.Info("No pods with allocated devices found on this node. Proceeding with shutdown.")
+				return true
+			}
+
+			// waitingForGrace tracks pods that are still considered "active" in the NRI phase.
+			// A pod is considered active if:
+			//  1. It recently triggered an NRI hook (within the gracePeriod).
+			//  2. It was prepared but hasn't triggered an NRI hook yet (using
+			//     defaultPreviousActivity).
+			// We wait for this grace period after each hook to ensure
+			// subsequent containers in the same pod (like sidecars or the main
+			// app container) also have a chance to be processed before we shut
+			// down the NRI plugin.
+			waitingForGrace := 0
+			for _, previousActivity := range activities {
+				if previousActivity.IsZero() {
+					previousActivity = defaultPreviousActivity
+				}
+				if np.clock.Since(previousActivity) < gracePeriod {
+					waitingForGrace++
+				}
+			}
+
+			// If no pods have had recent activity (or are still waiting for their first hook),
+			// we assume all in-flight pod initializations are complete.
+			if waitingForGrace == 0 {
+				klog.Info("All prepared pods have passed the grace period. Proceeding with shutdown.")
+				return true
+			}
+
+			klog.Infof("Waiting for %d prepared pods to finish NRI initialization: %d still in grace period...", pendingCount, waitingForGrace)
+			return false
+		}()
+
+		if done {
+			break
+		}
+
+		<-ticker.C()
+	}
+
+	// Step 3: Cancel context and stop NRI Plugin.
+	// Canceling the top-level context should be sufficient to stop the nriPlugin
+	// background tasks, but we also explicitly close it below.
+	ctxCancel()
+
+	np.nriPlugin.Stop()
+
+	// Close the pod config store.
+	if err := np.podConfigStore.Close(); err != nil {
+		klog.Errorf("Failed to close pod config database: %v", err)
+	}
+	if np.secondaryNICStore != nil {
+		if err := np.secondaryNICStore.Close(); err != nil {
+			klog.Errorf("Failed to close secondary NIC config database: %v", err)
+		}
+	}
+
+	klog.Info("Driver stopped.")
 }

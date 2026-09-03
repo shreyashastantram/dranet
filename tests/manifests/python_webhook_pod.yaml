@@ -1,0 +1,32 @@
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: dranet-python-claim
+spec:
+  spec:
+    devices:
+      requests:
+      - name: req-dummy1
+        exactly:
+          deviceClassName: dra.net
+          selectors:
+          - cel:
+              expression: has(device.attributes["dra.net"].webhook_attr) && device.attributes["dra.net"].webhook_attr == "python" && has(device.attributes["dra.net"].ifName) && device.attributes["dra.net"].ifName == "dummy1"
+      config:
+      - opaque:
+          driver: dra.net
+          parameters:
+            profile: "python-profile"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-python-webhook
+spec:
+  containers:
+  - name: app
+    image: registry.k8s.io/e2e-test-images/agnhost:2.54
+    command: ["sleep", "infinity"]
+  resourceClaims:
+  - name: dummy1
+    resourceClaimTemplateName: dranet-python-claim

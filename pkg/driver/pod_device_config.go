@@ -18,125 +18,285 @@ package driver
 
 import (
 	"sync"
+	"time"
 
+	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/dranet/pkg/apis"
 )
 
-// PodConfig holds the set of configurations to be applied for a single
+// PodConfig holds all the device configurations for a Pod, and can be extended
+// with fields that are not specific to a single device.
+type PodConfig struct {
+	// DeviceConfigs maps the allocated network device names to their respective
+	// configurations.
+	DeviceConfigs map[string]DeviceConfig
+
+	// LastNRIActivity timestamp is updated whenever an NRI hook processes
+	// a container for this Pod. Used to track pod initialization progress.
+	LastNRIActivity time.Time
+
+	// NetNS is the path to the Pod's network namespace as observed by the
+	// container runtime.
+	NetNS string
+}
+
+// DeviceConfig holds the set of configurations to be applied for a single
 // network device allocated to a Pod. This includes network interface settings,
 // routes for the Pod's network namespace, and RDMA configurations.
-type PodConfig struct {
-	Claim types.NamespacedName
+type DeviceConfig struct {
+	Claim types.NamespacedName `json:"claim"`
+
+	// DeviceSnapshot contains the original discovered ResourceSlice Device structure,
+	// which includes the device's identifying attributes and capacity.
+	DeviceSnapshot *resourceapi.Device `json:"deviceSnapshot,omitempty"`
 
 	// NetworkInterfaceConfigInHost is the config of the network interface as
 	// seen in the host's network namespace BEFORE it was moved to the pod's
 	// network namespace.
-	NetworkInterfaceConfigInHost apis.NetworkConfig
+	NetworkInterfaceConfigInHost apis.NetworkConfig `json:"networkInterfaceConfigInHost"`
 
 	// NetworkInterfaceConfigInPod contains all network-related configurations
 	// (interface, routes, ethtool, sysctl) to be applied for this device in the
 	// Pod's namespace.
-	NetworkInterfaceConfigInPod apis.NetworkConfig
+	NetworkInterfaceConfigInPod apis.NetworkConfig `json:"networkInterfaceConfigInPod"`
 
 	// RDMADevice holds RDMA-specific configurations if the network device
 	// has associated RDMA capabilities.
-	RDMADevice RDMAConfig
+	RDMADevice RDMAConfig `json:"rdmaDevice,omitempty"`
 }
 
 // RDMAConfig contains parameters for setting up an RDMA device associated
 // with a network interface.
 type RDMAConfig struct {
-	// LinkDev is the name of the RDMA link device (e.g., "mlx5_0") that
-	// corresponds to the allocated network device.
-	LinkDev string
+	// LinkDev is the name of the RDMA link device (e.g., "mlx5_0").
+	// Depending on the type of device (RoCE, IB) it may have a network device
+	// associated. For IB-only devices there is no associated network interface.
+	LinkDev string `json:"linkDev,omitempty"`
 
 	// DevChars is a list of user-space RDMA character
 	// devices (e.g., "/dev/infiniband/uverbs0", "/dev/infiniband/rdma_cm")
 	// that should be made available to the Pod.
-	DevChars []LinuxDevice
+	DevChars []LinuxDevice `json:"devChars,omitempty"`
 }
 
 type LinuxDevice struct {
-	Path     string
-	Type     string
-	Major    int64
-	Minor    int64
-	FileMode uint32
-	UID      uint32
-	GID      uint32
+	Path     string `json:"path"`
+	Type     string `json:"type"`
+	Major    int64  `json:"major"`
+	Minor    int64  `json:"minor"`
+	FileMode uint32 `json:"fileMode"`
+	UID      uint32 `json:"uid"`
+	GID      uint32 `json:"gid"`
 }
 
-// PodConfigStore provides a thread-safe, centralized store for all network device configurations
-// across multiple Pods. It is indexed by the Pod's UID, and for each Pod, it maps
-// network device names (as allocated) to their specific Config.
+// Checkpointer is the persistence interface for the PodConfigStore.
+// It provides durable storage so that pod device configurations survive
+// daemon restarts. Following the kubelet DRA checkpoint pattern
+// (pkg/kubelet/cm/dra/state), the in-memory PodConfigStore is the source
+// of truth and the Checkpointer is a write-through backend.
+// Note: Pod-level metadata like NetNS is not persisted (rebuilt on restart
+// via Synchronize() which queries the container runtime).
+type Checkpointer interface {
+	// GetOrCreate returns all persisted pod device configs, or an empty map
+	// if the checkpoint does not yet exist. Used at startup to restore state.
+	GetOrCreate() (map[types.UID]map[string]DeviceConfig, error)
+	// Store persists the device config for a single pod/device pair.
+	Store(podUID types.UID, deviceName string, config DeviceConfig) error
+	// DeletePod removes all persisted state for the given pod.
+	DeletePod(podUID types.UID) error
+	// Close releases any resources held by the checkpointer.
+	Close() error
+}
+
+// PodConfigStore provides a thread-safe, centralized store for all network
+// device configurations across multiple Pods. It is indexed by the Pod's UID.
+// All reads are served from memory. If a Checkpointer is provided, mutations
+// are written through to durable storage.
 type PodConfigStore struct {
-	mu      sync.RWMutex
-	configs map[types.UID]map[string]PodConfig
+	mu           sync.RWMutex
+	configs      map[types.UID]PodConfig
+	checkpointer Checkpointer // nil when no persistence is configured
 }
 
-// NewPodConfigStore creates and returns a new instance of PodConfigStore.
-func NewPodConfigStore() *PodConfigStore {
-	return &PodConfigStore{
-		configs: make(map[types.UID]map[string]PodConfig),
+// NewPodConfigStore creates a new PodConfigStore. If a Checkpointer is
+// provided, existing device configs are loaded from the checkpoint into memory.
+// Pod-level state is not persisted; NetNS is rebuilt through Synchronize() on
+// driver startup, while LastNRIActivity resets to its zero value.
+func NewPodConfigStore(checkpointer Checkpointer) (*PodConfigStore, error) {
+	s := &PodConfigStore{
+		configs:      make(map[types.UID]PodConfig),
+		checkpointer: checkpointer,
 	}
+
+	if checkpointer != nil {
+		saved, err := checkpointer.GetOrCreate()
+		if err != nil {
+			return nil, err
+		}
+		for podUID, devices := range saved {
+			klog.Infof("PodConfigStore: loaded checkpoint for pod %s (%d devices)", podUID, len(devices))
+			s.configs[podUID] = PodConfig{
+				DeviceConfigs: devices,
+			}
+		}
+	}
+
+	return s, nil
 }
 
-// Set stores the configuration for a specific device under a given Pod UID.
-// If a configuration for the Pod UID or device name already exists, it will be overwritten.
-func (s *PodConfigStore) Set(podUID types.UID, deviceName string, config PodConfig) {
+// Close closes the underlying checkpointer, if any.
+func (s *PodConfigStore) Close() error {
+	if s.checkpointer != nil {
+		return s.checkpointer.Close()
+	}
+	return nil
+}
+
+// UpdateLastNRIActivity updates the LastNRIActivity timestamp for a given Pod UID.
+// If the PodConfig doesn't exist, it does nothing.
+func (s *PodConfigStore) UpdateLastNRIActivity(podUID types.UID, timestamp time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.configs[podUID]; !ok {
-		s.configs[podUID] = make(map[string]PodConfig)
+	if podConfig, ok := s.configs[podUID]; ok {
+		podConfig.LastNRIActivity = timestamp
+		s.configs[podUID] = podConfig
 	}
-	s.configs[podUID][deviceName] = config
 }
 
-// Get retrieves the configuration for a specific device under a given Pod UID.
-// It returns the Config and true if found, otherwise an empty Config and false.
-func (s *PodConfigStore) Get(podUID types.UID, deviceName string) (PodConfig, bool) {
+// GetPodNRIActivities returns a map of Pod UIDs to their last NRI activity timestamp.
+func (s *PodConfigStore) GetPodNRIActivities() map[types.UID]time.Time {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if podConfigs, ok := s.configs[podUID]; ok {
-		config, found := podConfigs[deviceName]
+	activities := make(map[types.UID]time.Time, len(s.configs))
+	for uid, config := range s.configs {
+		activities[uid] = config.LastNRIActivity
+	}
+	return activities
+}
+
+// SetDeviceConfig stores the configuration for a specific device under a given Pod UID.
+// If a configuration for the Pod UID or device name already exists, it will be overwritten.
+// The write is persisted through the checkpointer if one is configured.
+// Persistence is attempted before updating in-memory state to ensure RAM and
+// disk don't diverge if the checkpoint write fails.
+func (s *PodConfigStore) SetDeviceConfig(podUID types.UID, deviceName string, config DeviceConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.checkpointer != nil {
+		if err := s.checkpointer.Store(podUID, deviceName, config); err != nil {
+			klog.Errorf("failed to checkpoint device config for pod %s device %s: %v", podUID, deviceName, err)
+			return err
+		}
+	}
+
+	podConfig, ok := s.configs[podUID]
+	if !ok {
+		podConfig = PodConfig{
+			DeviceConfigs: make(map[string]DeviceConfig),
+		}
+		s.configs[podUID] = podConfig
+	}
+	podConfig.DeviceConfigs[deviceName] = config
+	return nil
+}
+
+// GetDeviceConfig retrieves the configuration for a specific device under a given Pod UID.
+// It returns the Config and true if found, otherwise an empty Config and false.
+func (s *PodConfigStore) GetDeviceConfig(podUID types.UID, deviceName string) (DeviceConfig, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if podConfig, ok := s.configs[podUID]; ok {
+		config, found := podConfig.DeviceConfigs[deviceName]
 		return config, found
 	}
-	return PodConfig{}, false
+	return DeviceConfig{}, false
 }
 
 // DeletePod removes all configurations associated with a given Pod UID.
+// Checkpoint deletion is attempted first, but the in-memory entry is removed
+// regardless of checkpoint outcome. This asymmetry with SetDeviceConfig
+// (which aborts on checkpoint failure) is intentional:
+//   - A failed Set leaving stale RAM would silently lose config on restart (#89).
+//   - A failed Delete leaving a stale checkpoint is harmless: Synchronize()
+//     prunes orphaned checkpoint entries on the next startup by diffing
+//     against live pods from the container runtime.
+//
+// Skipping the RAM delete would be worse — the driver would keep processing
+// a pod that the runtime has already removed.
 func (s *PodConfigStore) DeletePod(podUID types.UID) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.checkpointer != nil {
+		if err := s.checkpointer.DeletePod(podUID); err != nil {
+			klog.Errorf("failed to delete checkpoint for pod %s: %v", podUID, err)
+		}
+	}
 	delete(s.configs, podUID)
 }
 
-// GetPodConfigs retrieves all device configurations for a given Pod UID.
-// It is indexed by the Pod's UID, and for each Pod, it maps network device names (as allocated)
-// to their specific Config.
-func (s *PodConfigStore) GetPodConfigs(podUID types.UID) (map[string]PodConfig, bool) {
+// ListPods returns the UIDs of all pods in the store.
+func (s *PodConfigStore) ListPods() []types.UID {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	podConfigs, found := s.configs[podUID]
-	if !found {
-		return nil, false
+	uids := make([]types.UID, 0, len(s.configs))
+	for uid := range s.configs {
+		uids = append(uids, uid)
 	}
-	// Return a copy to prevent external modification of the internal map
-	configsCopy := make(map[string]PodConfig, len(podConfigs))
-	for k, v := range podConfigs {
-		configsCopy[k] = v
-	}
-	return configsCopy, true
+	return uids
 }
 
-// DeleteClaim removes all configurations associated with a given claim.
-func (s *PodConfigStore) DeleteClaim(claim types.NamespacedName) {
+// GetPodConfig retrieves all configurations for a given Pod UID.
+// It is indexed by the Pod's UID.
+func (s *PodConfigStore) GetPodConfig(podUID types.UID) (PodConfig, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	podConfig, found := s.configs[podUID]
+	if !found {
+		return PodConfig{}, false
+	}
+	// Return a copy to prevent external modification of the internal map
+	configsCopy := make(map[string]DeviceConfig, len(podConfig.DeviceConfigs))
+	for k, v := range podConfig.DeviceConfigs {
+		configsCopy[k] = v
+	}
+	return PodConfig{
+		DeviceConfigs:   configsCopy,
+		LastNRIActivity: podConfig.LastNRIActivity,
+		NetNS:           podConfig.NetNS,
+	}, true
+}
+
+// SetPodNetNs stores the Pod's network namespace path in the pod-level config.
+// This is in-memory only; pod NetNS is rebuilt from the container runtime on
+// driver restart via Synchronize().
+func (s *PodConfigStore) SetPodNetNs(podUID types.UID, netns string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	podCfg, ok := s.configs[podUID]
+	if !ok {
+		klog.Errorf("SetPodNetNs: pod UID %s not found in store; skipping NetNS update", podUID)
+		return
+	}
+	klog.V(3).Infof("SetPodNetNs: setting NetNS for pod %s to %q", podUID, netns)
+	podCfg.NetNS = netns
+	s.configs[podUID] = podCfg
+}
+
+// DeleteClaim removes all configurations associated with a given claim and
+// returns the list of Pod UIDs that were associated with it.
+// Like DeletePod, checkpoint failures do not prevent in-memory cleanup.
+// See DeletePod for rationale on this intentional asymmetry with SetDeviceConfig.
+func (s *PodConfigStore) DeleteClaim(claim types.NamespacedName) []types.UID {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	podsToDelete := []types.UID{}
-	for uid, podConfigsMap := range s.configs {
-		for _, config := range podConfigsMap {
+	for uid, podConfig := range s.configs {
+		for _, config := range podConfig.DeviceConfigs {
 			if config.Claim == claim {
 				podsToDelete = append(podsToDelete, uid)
 				break // Found a match for this pod, no need to check other devices for the same pod
@@ -145,6 +305,29 @@ func (s *PodConfigStore) DeleteClaim(claim types.NamespacedName) {
 	}
 
 	for _, uid := range podsToDelete {
+		if s.checkpointer != nil {
+			if err := s.checkpointer.DeletePod(uid); err != nil {
+				klog.Errorf("failed to delete checkpoint for pod %s: %v", uid, err)
+			}
+		}
 		delete(s.configs, uid)
 	}
+	return podsToDelete
+}
+
+// GetAllocatedDeviceSnapshots returns all devices currently allocated to active pods
+// that have a valid device attributes snapshot stored in BoltDB.
+func (s *PodConfigStore) GetAllocatedDeviceSnapshots() []resourceapi.Device {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var allocated []resourceapi.Device
+	for _, podConfig := range s.configs {
+		for _, config := range podConfig.DeviceConfigs {
+			if config.DeviceSnapshot != nil {
+				allocated = append(allocated, *config.DeviceSnapshot)
+			}
+		}
+	}
+	return allocated
 }

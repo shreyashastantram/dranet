@@ -68,11 +68,11 @@ kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
 - role: control-plane
-  image: kindest/node:v1.34.0
+  image: kindest/node:v1.36.1
 - role: worker
-  image: kindest/node:v1.34.0
+  image: kindest/node:v1.36.1
 - role: worker
-  image: kindest/node:v1.34.0
+  image: kindest/node:v1.36.1
 ```
 
 Then to create the cluster:
@@ -94,6 +94,24 @@ Install the latest stable version of DRANET using the provided manifest:
 ```sh
 kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/dranet/refs/heads/main/install.yaml
 ```
+
+or using the Helm chart:
+
+```sh
+helm install -n kube-system dranet oci://registry.k8s.io/networking/charts/dranet --version v1.4.0
+```
+
+For available configuration options, see the [chart README](deployments/helm/dranet/README.md).
+
+DRANET persists prepared pod device configuration in local bbolt databases so
+NRI hooks can continue initialization after a driver restart. Generic DRA state
+uses `/var/run/dranet/dranet.db`; secondary NIC attachment intent uses
+`/var/run/dranet/secondary-nic.db`. Deployment manifests must mount
+`/var/run/dranet` as writable storage (hostPath with `DirectoryOrCreate` in the
+provided manifests).
+
+Override the paths with `--db-path` and `--secondary-nic-db-path`. Set either
+flag to an empty string to use in-memory state for that store.
 
 ### How to Use It
 

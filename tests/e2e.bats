@@ -11,6 +11,7 @@ teardown() {
   fi
   cleanup_k8s_resources
   cleanup_dummy_interfaces
+  cleanup_veth_interfaces
   cleanup_bpf_programs
   # The driver is rate limited to updates with interval of atleast 5 seconds. So
   # we need to sleep for an equivalent amount of time to ensure state from a
@@ -61,6 +62,17 @@ cleanup_dummy_interfaces() {
       for dev in $(ip -br link show type dummy | awk "{print \$1}"); do
         ip link delete "$dev" || echo "Failed to delete $dev"
       done
+    '
+  done
+}
+
+cleanup_veth_interfaces() {
+  for node in "$CLUSTER_NAME"-worker "$CLUSTER_NAME"-worker2; do
+    docker exec "$node" bash -c '
+      ip link delete vrf-test-pod-1 || true
+      ip link delete vrf-test-pod-2 || true
+      ip link delete pbr-test-pod-1 || true
+      ip link delete pbr-test-pod-2 || true
     '
   done
 }
@@ -167,14 +179,17 @@ setup_tcx_filter() {
 }
 
 @test "test metric server is up and operating on host" {
-  output=$(kubectl \
-    run -i test-metrics \
+  # Run a temporary pod to access metrics
+  kubectl run test-metrics \
     --image registry.k8s.io/e2e-test-images/agnhost:2.54 \
     --overrides='{"spec": {"hostNetwork": true}}' \
     --restart=Never \
     --command \
-    -- sh -c "curl --silent localhost:9177/metrics | grep process_start_time_seconds >/dev/null && echo ok || echo fail")
-  assert_equal "$output" "ok"
+    -- sh -c "curl --silent localhost:9177/metrics | grep process_start_time_seconds >/dev/null && echo ok || echo fail"
+
+  # Wait for completion and verify output
+  kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/test-metrics --timeout=5s
+  assert_equal "$(kubectl logs test-metrics)" "ok"
 }
 
 
@@ -409,6 +424,85 @@ EOF
   kubectl rollout status ds/dranet --namespace=kube-system
 }
 
+@test "unprepare claims on driver restart after pod deletion during driver downtime" {
+  local NODE_NAME="$CLUSTER_NAME"-worker
+  local DUMMY_IFACE="dummy-downtime"
+
+  docker exec "$NODE_NAME" bash -c "ip link add $DUMMY_IFACE type dummy"
+  docker exec "$NODE_NAME" bash -c "ip link set up dev $DUMMY_IFACE"
+
+  kubectl apply -f "$BATS_TEST_DIRNAME"/../tests/manifests/deviceclass.yaml
+  kubectl apply -f "$BATS_TEST_DIRNAME"/../tests/manifests/resourceclaim.yaml
+  
+  kubectl wait --timeout=30s --for=condition=ready pods -l app=pod
+
+  local POD_NAME
+  POD_NAME=$(kubectl get pods -l app=pod -o name)
+  local POD_UID
+  POD_UID=$(kubectl get "$POD_NAME" -o jsonpath='{.metadata.uid}')
+
+  # Turn down the dranet driver on NODE_NAME by scheduling it off
+  kubectl label node "$NODE_NAME" e2e-test-do-not-schedule=true
+  kubectl patch daemonset dranet -n kube-system --type='merge' --patch-file=<(cat <<EOF
+spec:
+  template:
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: e2e-test-do-not-schedule
+                operator: DoesNotExist
+EOF
+)
+  kubectl rollout status ds/dranet --namespace=kube-system
+
+  # Delete the pod forcefully. Verify the pod is immediately removed from the API server.
+  kubectl delete "$POD_NAME" --force
+  run kubectl get "$POD_NAME"
+  assert_failure
+
+  # Inspect the bbolt database for the deleted pod configs. The pod configs should
+  # still exist since driver is offline. Stream the database file using cat, redirect
+  # it to the local test path, and read the keys for the deleted pod using bbolt CLI.
+  docker exec "$NODE_NAME" cat /var/run/dranet/dranet.db > "$BATS_TEST_DIRNAME/../_artifacts/dranet.db"
+  go run go.etcd.io/bbolt/cmd/bbolt@latest keys "$BATS_TEST_DIRNAME/../_artifacts/dranet.db" pod_configs "$POD_UID" > /dev/null 2>&1
+
+  # Restore the dranet driver on NODE_NAME by reverting affinity patch and removing node label.
+  # Verify the driver is restarted sucsessfully on the node.
+  kubectl patch daemonset dranet -n kube-system --type='merge' --patch-file=<(cat <<EOF
+spec:
+  template:
+    spec:
+      affinity: {}
+EOF
+)
+  kubectl label node "$NODE_NAME" e2e-test-do-not-schedule-
+  kubectl wait --namespace=kube-system --for=condition=Ready pod -l app=dranet --field-selector spec.nodeName="$NODE_NAME" --timeout=60s
+
+  # The driver should asynchronously process the cleanup after the restart.
+  # Inspect the bbolt database again to verify the pod configs have been deleted.
+  local retries=10
+  local wait_sec=2
+  local removed=false
+
+  for ((i=1; i<=retries; i++)); do
+    if ! docker exec "$NODE_NAME" cat /var/run/dranet/dranet.db > "$BATS_TEST_DIRNAME/../_artifacts/dranet.db"; then
+      sleep $wait_sec
+      continue
+    fi
+    if ! go run go.etcd.io/bbolt/cmd/bbolt@latest keys "$BATS_TEST_DIRNAME/../_artifacts/dranet.db" pod_configs "$POD_UID" > /dev/null 2>&1; then
+      removed=true
+      break
+    fi
+    sleep $wait_sec
+  done
+
+  [ "$removed" = "true" ]
+}
+
+
 @test "permanent neighbor entry is copied to pod namespace" {
   local NODE_NAME="$CLUSTER_NAME"-worker
   local DUMMY_IFACE="dummy-neigh"
@@ -493,5 +587,127 @@ EOF
   assert_success
   assert_output --partial "fd36::3:0:e:0:0/96 dev dummy-ipv6 proto kernel metric 256 pref medium"
   refute_output --partial "fd36::3:0:e:0:0/96 dev dummy-ipv6 metric 1024 pref medium"
+}
+
+
+@test "validate pbr configuration" {
+  local NODE_NAME="$CLUSTER_NAME"-worker
+  
+  # Create veth pairs for Pod1 <-> Router and Pod2 <-> Router
+  # pbr-test-pod-1 connects to pbr-test-router-1 (Router Interface 1)
+  docker exec "$NODE_NAME" bash -c "ip link add pbr-test-pod-1 type veth peer name pbr-rtr-1"
+  docker exec "$NODE_NAME" bash -c "ip link set up dev pbr-test-pod-1"
+  docker exec "$NODE_NAME" bash -c "ip link set up dev pbr-rtr-1"
+
+  # pbr-test-pod-2 connects to pbr-test-router-2 (Router Interface 2)
+  docker exec "$NODE_NAME" bash -c "ip link add pbr-test-pod-2 type veth peer name pbr-rtr-2"
+  docker exec "$NODE_NAME" bash -c "ip link set up dev pbr-test-pod-2"
+  docker exec "$NODE_NAME" bash -c "ip link set up dev pbr-rtr-2"
+
+  kubectl apply -f "$BATS_TEST_DIRNAME"/../tests/manifests/deviceclass.yaml
+  kubectl apply -f "$BATS_TEST_DIRNAME"/../tests/manifests/resourceclaim_pbr.yaml
+  
+  kubectl wait --timeout=60s --for=condition=ready pods -l app=pod-pbr-1
+  kubectl wait --timeout=60s --for=condition=ready pods -l app=pod-pbr-router
+  kubectl wait --timeout=60s --for=condition=ready pods -l app=pod-pbr-2
+
+  POD_1=$(kubectl get pods -l app=pod-pbr-1 -o name)
+  
+  # Verify PBR routing: Ping from Pod 1 (192.168.100.10) to Pod 2 (192.168.200.10) via Router
+  # Traffic MUST use Table 100 to reach the gateway (192.168.100.2 - Router).
+  # Router then forwards to 192.168.200.2 which is its own interface on the other side?
+  # Interface 1: 192.168.100.2/24 (connected to pod-pbr-1)
+  # Interface 2: 192.168.200.2/24 (connected to pod-pbr-2)
+  # Pod-pbr-1 routes 192.168.200.0/24 via 192.168.100.2.
+  # Pod-pbr-2 has IP 192.168.200.10.
+  
+  run kubectl exec -it $POD_1 -- ping -c 1 192.168.200.10
+  assert_success
+}
+
+@test "validate vrf routing" {
+  local NODE_NAME="$CLUSTER_NAME"-worker
+  
+  # Create veth pairs for Pod1 <-> Router and Pod2 <-> Router
+  # vrf-test-pod-1 connects to vrf-test-router-1 (Router Interface 1)
+  docker exec "$NODE_NAME" bash -c "ip link add vrf-test-pod-1 type veth peer name vrf-rtr-1"
+  docker exec "$NODE_NAME" bash -c "ip link set up dev vrf-test-pod-1"
+  docker exec "$NODE_NAME" bash -c "ip link set up dev vrf-rtr-1"
+
+  # vrf-test-pod-2 connects to vrf-test-router-2 (Router Interface 2)
+  docker exec "$NODE_NAME" bash -c "ip link add vrf-test-pod-2 type veth peer name vrf-rtr-2"
+  docker exec "$NODE_NAME" bash -c "ip link set up dev vrf-test-pod-2"
+  docker exec "$NODE_NAME" bash -c "ip link set up dev vrf-rtr-2"
+
+  # Apply manifests for three pods
+  kubectl apply -f "$BATS_TEST_DIRNAME"/../tests/manifests/deviceclass.yaml
+  kubectl apply -f "$BATS_TEST_DIRNAME"/../tests/manifests/resourceclaim_vrf.yaml
+
+  kubectl wait --timeout=60s --for=condition=ready pods -l app=pod-vrf-1
+  kubectl wait --timeout=60s --for=condition=ready pods -l app=pod-vrf-router
+  kubectl wait --timeout=60s --for=condition=ready pods -l app=pod-vrf-2
+
+  POD_1=$(kubectl get pods -l app=pod-vrf-1 -o name)
+  
+  # Verify ping from Pod 1 to Pod 2 via the Router.
+  # Traffic flow: Pod1(eth1) -> Router(eth1) -> Router(eth2) -> Pod2(eth1)
+  # We use -I eth1 to force usage of the VRF domain/interface.
+  run kubectl exec -it $POD_1 -- ping -I eth1 -c 1 10.10.20.1
+  assert_success
+}
+
+@test "allocated device in ResourceSlice remains unchanged" {
+  local NODE_NAME="$CLUSTER_NAME"-worker
+  local DUMMY_IFACE="dummy0"
+
+  # 0. Save original daemonset container args and enable the feature gate
+  local ORIGINAL_ARGS
+  ORIGINAL_ARGS=$(kubectl get daemonset dranet -n kube-system -o jsonpath='{.spec.template.spec.containers[0].args}')
+  kubectl patch daemonset dranet -n kube-system --type='json' -p='[{"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--feature-gates=PersistentResourceSliceAttributes=true"}]'
+  kubectl rollout status -n kube-system daemonset/dranet --timeout=90s
+
+  # 1. Create a dummy interface on the worker node
+  docker exec "$NODE_NAME" bash -c "ip link add $DUMMY_IFACE type dummy"
+  docker exec "$NODE_NAME" bash -c "ip link set up dev $DUMMY_IFACE"
+
+  # 2. Wait for it to be discovered and published to the ResourceSlice
+  sleep 5
+  run kubectl get resourceslices -o jsonpath='{.items[*].spec.devices[*].name}'
+  assert_success
+  assert_output --partial "$DUMMY_IFACE"
+
+  # Retrieve its original attributes before allocation
+  local ORIGINAL_ATTRIBUTES
+  ORIGINAL_ATTRIBUTES=$(kubectl get resourceslices -o jsonpath="{.items[*].spec.devices[?(@.name=='$DUMMY_IFACE')].attributes}")
+
+  # Ensure the retrieved values are not empty
+  [ -n "$ORIGINAL_ATTRIBUTES" ]
+
+  # 3. Apply the resource claim (allocating dummy0) and start the Pod
+  kubectl apply -f "$BATS_TEST_DIRNAME"/../tests/manifests/deviceclass.yaml
+  kubectl apply -f "$BATS_TEST_DIRNAME"/../tests/manifests/resourceclaim.yaml
+  kubectl wait --timeout=30s --for=condition=ready pods -l app=pod
+
+  # 4. Verify that the allocated dummy0 device attributes are still present and correct
+  run kubectl get resourceslices -o jsonpath="{.items[*].spec.devices[?(@.name=='$DUMMY_IFACE')].attributes}"
+  assert_success
+  assert_output "$ORIGINAL_ATTRIBUTES"
+
+  # 5. Restart the DRANET daemonset to test persistence
+  kubectl rollout restart -n kube-system daemonset/dranet
+  kubectl rollout status -n kube-system daemonset/dranet --timeout=90s
+
+  # 6. Verify that the allocated device attributes are still correct after daemon restart
+  run kubectl get resourceslices -o jsonpath="{.items[*].spec.devices[?(@.name=='$DUMMY_IFACE')].attributes}"
+  assert_success
+  assert_output "$ORIGINAL_ATTRIBUTES"
+
+  # 7. Clean up Pod, Claim, Interface and restore original daemonset args
+  kubectl delete -f "$BATS_TEST_DIRNAME"/../tests/manifests/resourceclaim.yaml --ignore-not-found
+  kubectl wait --for delete pod/pod1 --timeout=30s
+  docker exec "$NODE_NAME" ip link delete $DUMMY_IFACE || true
+
+  kubectl patch daemonset dranet -n kube-system --type='json' -p="[{\"op\": \"replace\", \"path\": \"/spec/template/spec/containers/0/args\", \"value\": $ORIGINAL_ARGS}]"
+  kubectl rollout status -n kube-system daemonset/dranet --timeout=90s
 }
 

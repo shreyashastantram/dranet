@@ -1,0 +1,54 @@
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: registry.k8s.io/networking/dranet
+  # tag defaults to .Chart.AppVersion when empty, which is set to the release tag at package time
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+rbac:
+  create: true
+
+podAnnotations: {}
+podLabels: {}
+
+logVerbosity: 4
+metricsPort: ~
+metricsPath: /healthz
+
+# dranet daemon arguments — omit any field to use the binary's built-in default
+args: {}
+#  filter: '!("dra.net/type" in attributes) || attributes["dra.net/type"].StringValue  != "veth"'
+#  inventoryMinPollInterval: "2s"
+#  inventoryMaxPollInterval: "1m"
+#  inventoryPollBurst: 5
+#  moveIBInterfaces: true
+#  cloudProviderHint: ""
+
+# kubeletRootDir is the kubelet data directory (its --root-dir). The driver's
+# registration socket lives under <kubeletRootDir>/plugins_registry (which the
+# kubelet watches) and its dra.sock under <kubeletRootDir>/plugins. The same path
+# is used for the hostPath and the mountPath so it is identical inside and outside
+# the container, as the kubeletplugin library requires. Set this to match the
+# kubelet --root-dir on clusters that relocate it; the default suits a standard kubelet.
+kubeletRootDir: /var/lib/kubelet
+
+nodeSelector: {}
+
+affinity: {}
+
+tolerations:
+  - operator: Exists
+    effect: NoSchedule
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 50Mi
+  limits: {}
+
+serviceAccount:
+  annotations: {}

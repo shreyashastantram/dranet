@@ -1,0 +1,127 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "nameOverride": {
+      "type": "string"
+    },
+    "fullnameOverride": {
+      "type": "string"
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": {
+          "type": "string"
+        },
+        "tag": {
+          "type": "string"
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        }
+      }
+    },
+    "imagePullSecrets": {
+      "type": "array"
+    },
+    "rbac": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": {
+          "type": "boolean"
+        }
+      }
+    },
+    "podAnnotations": {
+      "type": "object"
+    },
+    "podLabels": {
+      "type": "object"
+    },
+    "metricsPort": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "metricsPath": {
+      "type": "string"
+    },
+    "logVerbosity": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "kubeletRootDir": {
+      "type": "string",
+      "description": "Kubelet data directory (its --root-dir); the driver's plugin and registration sockets live under it"
+    },
+    "args": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "filter": {
+          "type": "string",
+          "description": "CEL expression to filter network interface attributes"
+        },
+        "inventoryMinPollInterval": {
+          "type": "string",
+          "pattern": "^[0-9]+(ns|us|ms|s|m|h)$",
+          "description": "Go duration string, e.g. '2s', '500ms'"
+        },
+        "inventoryMaxPollInterval": {
+          "type": "string",
+          "pattern": "^[0-9]+(ns|us|ms|s|m|h)$",
+          "description": "Go duration string, e.g. '1m', '30s'"
+        },
+        "inventoryPollBurst": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "moveIBInterfaces": {
+          "type": "boolean"
+        },
+        "cloudProviderHint": {
+          "type": "string",
+          "enum": ["GCE", "AZURE", "OKE", "AWS", "ALIBABA", "NONE"],
+          "description": "Hint for the cloud provider plugin; auto-detected if unset"
+        }
+      }
+    },
+    "nodeSelector": {
+      "type": "object"
+    },
+    "affinity": {
+      "type": "object"
+    },
+    "tolerations": {
+      "type": "array"
+    },
+    "resources": {
+      "type": "object",
+      "properties": {
+        "requests": {
+          "type": "object"
+        },
+        "limits": {
+          "type": "object"
+        }
+      }
+    },
+    "global": {
+      "type": "object"
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "annotations": {
+          "type": "object"
+        }
+      }
+    }
+  }
+}

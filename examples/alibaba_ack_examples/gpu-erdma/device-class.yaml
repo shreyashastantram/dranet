@@ -1,0 +1,16 @@
+# DeviceClass for Alibaba Cloud eRDMA devices.
+# Selects all eRDMA devices published by dranet on Alibaba Cloud instances.
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: erdma.alibaba.dra.net
+spec:
+  selectors:
+  - cel:
+      expression: >-
+        device.driver == "dra.net" &&
+        device.attributes["dra.net"].rdma == true
+  - cel:
+      expression: >-
+        "alibaba.dra.net" in device.attributes &&
+        device.attributes["alibaba.dra.net"]["erdma"] == true

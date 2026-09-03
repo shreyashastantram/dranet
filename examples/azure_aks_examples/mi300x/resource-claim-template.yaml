@@ -1,0 +1,51 @@
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: 4nic-same-numa
+spec:
+  spec:
+    devices:
+      requests:
+      - name: nic
+        exactly:
+          deviceClassName: dranet.net
+          count: 4
+          selectors:
+          - cel:
+              expression: >-
+                device.attributes["dra.net"]["rdma"] == true &&
+                device.attributes["dra.net"]["numaNode"] == 0
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: 4nic-cross-numa
+spec:
+  spec:
+    devices:
+      requests:
+      - name: nic
+        exactly:
+          deviceClassName: dranet.net
+          count: 4
+          selectors:
+          - cel:
+              expression: >-
+                device.attributes["dra.net"]["rdma"] == true &&
+                device.attributes["dra.net"]["numaNode"] == 1
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: 8nic-all
+spec:
+  spec:
+    devices:
+      requests:
+      - name: nic
+        exactly:
+          deviceClassName: dranet.net
+          count: 8
+          selectors:
+          - cel:
+              expression: 'device.attributes["dra.net"]["rdma"] == true'

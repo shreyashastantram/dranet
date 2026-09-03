@@ -24,6 +24,14 @@ rules:
     verbs:
       - get
   - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+      - update
+  - apiGroups:
       - "resource.k8s.io"
     resources:
       - resourceslices
@@ -47,6 +55,15 @@ rules:
     verbs:
       - patch
       - update
+  - apiGroups:
+      - "resource.k8s.io"
+    resources:
+      - resourceclaims/driver
+    verbs:
+      - associated-node:patch
+      - associated-node:update
+    resourceNames:
+      - dra.net
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
@@ -110,6 +127,12 @@ spec:
             memory: "50Mi"
         securityContext:
           privileged: true
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: 9177
+          failureThreshold: 12
+          periodSeconds: 5
         readinessProbe:
           httpGet:
             path: /healthz
@@ -130,6 +153,8 @@ spec:
         - name: bpf-programs
           mountPath: /sys/fs/bpf
           mountPropagation: HostToContainer
+        - name: dranet-run
+          mountPath: /var/run/dranet
       volumes:
       - name: device-plugin
         hostPath:
@@ -146,10 +171,11 @@ spec:
       - name: infiniband
         hostPath:
           path: /dev/infiniband
-      - name: etc
-        hostPath:
-          path: /etc
       - name: bpf-programs
         hostPath:
           path: /sys/fs/bpf
+      - name: dranet-run
+        hostPath:
+          path: /var/run/dranet
+          type: DirectoryOrCreate
 ---
