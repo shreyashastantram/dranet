@@ -421,6 +421,21 @@ func (np *NetworkDriver) Stop(ctxCancel context.CancelFunc) {
 
 			// Get the current set of prepared pods and their latest NRI activity timestamps.
 			activities := np.podConfigStore.GetPodNRIActivities()
+			if np.secondaryNICStore != nil {
+				for podUID, secondaryActivity := range np.secondaryNICStore.GetPodNRIActivities() {
+					activity, found := activities[podUID]
+					switch {
+					case !found:
+						activities[podUID] = secondaryActivity
+					case activity.IsZero() || secondaryActivity.IsZero():
+						// A zero value in either store means one prepared device path
+						// has not yet been observed by NRI in this process.
+						activities[podUID] = time.Time{}
+					case secondaryActivity.After(activity):
+						activities[podUID] = secondaryActivity
+					}
+				}
+			}
 			pendingCount := len(activities)
 			if pendingCount == 0 {
 				klog.Info("No pods with allocated devices found on this node. Proceeding with shutdown.")

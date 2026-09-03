@@ -155,6 +155,13 @@ func (np *NetworkDriver) RunPodSandbox(ctx context.Context, pod *api.PodSandbox)
 
 	// Process secondary NIC devices if present.
 	if hasSecondaryNICConfig {
+		// Mark both entry and completion. Entry protects an active callback from
+		// graceful shutdown; completion starts a fresh grace period for a possible
+		// containerd retry after either success or failure.
+		np.secondaryNICStore.UpdateLastNRIActivity(podUID, time.Now())
+		defer func() {
+			np.secondaryNICStore.UpdateLastNRIActivity(podUID, time.Now())
+		}()
 		if err := np.runPodSandboxSecondaryNICs(ctx, pod, secondaryNICConfigs); err != nil {
 			status = statusFailed
 			return err

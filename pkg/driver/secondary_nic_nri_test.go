@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	nriapi "github.com/containerd/nri/pkg/api"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -332,6 +333,54 @@ func TestRunPodSandbox_DispatchesSecondaryNIC(t *testing.T) {
 	if called != 1 {
 		t.Fatalf("exclusive NIC attach dispatched %d times, want 1", called)
 	}
+	if activity := np.secondaryNICStore.GetPodNRIActivities()[podUID]; activity.IsZero() {
+		t.Fatal("successful secondary NIC NRI activity was not recorded")
+	}
+}
+
+func TestRunPodSandbox_RecordsSecondaryNICActivityAtEntry(t *testing.T) {
+	oldAttach := nsAttachSecondaryNICHook
+	defer func() { nsAttachSecondaryNICHook = oldAttach }()
+	attachStarted := make(chan struct{})
+	releaseAttach := make(chan struct{})
+	nsAttachSecondaryNICHook = func(NICMode, *NICConfig, string) (*resourceapi.NetworkDeviceData, error) {
+		close(attachStarted)
+		<-releaseAttach
+		return &resourceapi.NetworkDeviceData{InterfaceName: sharedNICInterfaceName}, nil
+	}
+
+	podUID := types.UID("pod-uid-active-attach")
+	np := &NetworkDriver{
+		podConfigStore:    mustNewPodConfigStore(),
+		secondaryNICStore: NewSecondaryNICPodConfigStore(),
+	}
+	if err := np.secondaryNICStore.Set(podUID, "eth1", SecondaryNICPodConfig{
+		Mode: NICModeShared,
+		NIC:  NICConfig{MAC: "aa:bb:cc:dd:ee:01"},
+	}, types.NamespacedName{Namespace: "ns-a", Name: "claim-a"}); err != nil {
+		t.Fatal(err)
+	}
+	pod := testSecondaryNICPod("/run/netns/pod-active")
+	pod.Uid = string(podUID)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- np.RunPodSandbox(context.Background(), pod)
+	}()
+	select {
+	case <-attachStarted:
+	case <-time.After(time.Second):
+		close(releaseAttach)
+		t.Fatal("secondary NIC attach did not start")
+	}
+	if activity := np.secondaryNICStore.GetPodNRIActivities()[podUID]; activity.IsZero() {
+		close(releaseAttach)
+		t.Fatal("active secondary NIC NRI callback was not recorded")
+	}
+	close(releaseAttach)
+	if err := <-done; err != nil {
+		t.Fatalf("RunPodSandbox failed: %v", err)
+	}
 }
 
 func TestRunPodSandbox_SecondaryNICAttachFailure(t *testing.T) {
@@ -366,6 +415,9 @@ func TestRunPodSandbox_SecondaryNICAttachFailure(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(nriPluginRequestsTotal.WithLabelValues(methodRunPodSandbox, statusSuccess)); got != 0 {
 		t.Fatalf("success metric = %v, want 0", got)
+	}
+	if activity := np.secondaryNICStore.GetPodNRIActivities()[podUID]; activity.IsZero() {
+		t.Fatal("failed secondary NIC NRI activity was not recorded")
 	}
 }
 

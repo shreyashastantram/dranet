@@ -18,6 +18,7 @@ package driver
 
 import (
 	"sync"
+	"time"
 
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/dranet/pkg/apis"
@@ -105,15 +106,17 @@ type SecondaryNICCheckpointer interface {
 // This store lives in its own file (secondary_nic_store.go) that upstream never touches,
 // so git rebase on upstream changes never conflicts with it.
 type SecondaryNICPodConfigStore struct {
-	mu           sync.RWMutex
-	store        map[types.UID]map[string]SecondaryNICPodConfig // podUID → deviceName → config
-	checkpointer SecondaryNICCheckpointer
+	mu              sync.RWMutex
+	store           map[types.UID]map[string]SecondaryNICPodConfig // podUID → deviceName → config
+	nriLastActivity map[types.UID]time.Time
+	checkpointer    SecondaryNICCheckpointer
 }
 
 // NewSecondaryNICPodConfigStore creates an in-memory secondary NIC store.
 func NewSecondaryNICPodConfigStore() *SecondaryNICPodConfigStore {
 	return &SecondaryNICPodConfigStore{
-		store: make(map[types.UID]map[string]SecondaryNICPodConfig),
+		store:           make(map[types.UID]map[string]SecondaryNICPodConfig),
+		nriLastActivity: make(map[types.UID]time.Time),
 	}
 }
 
@@ -121,8 +124,9 @@ func NewSecondaryNICPodConfigStore() *SecondaryNICPodConfigStore {
 // secondary NIC configurations into memory.
 func newSecondaryNICPodConfigStore(checkpointer SecondaryNICCheckpointer) (*SecondaryNICPodConfigStore, error) {
 	store := &SecondaryNICPodConfigStore{
-		store:        make(map[types.UID]map[string]SecondaryNICPodConfig),
-		checkpointer: checkpointer,
+		store:           make(map[types.UID]map[string]SecondaryNICPodConfig),
+		nriLastActivity: make(map[types.UID]time.Time),
+		checkpointer:    checkpointer,
 	}
 	if checkpointer == nil {
 		return store, nil
@@ -134,6 +138,9 @@ func newSecondaryNICPodConfigStore(checkpointer SecondaryNICCheckpointer) (*Seco
 	}
 	for podUID, configs := range saved {
 		store.store[podUID] = configs
+		// Activity is process-local. A restored prepared pod has not yet been
+		// observed by an NRI callback in this process.
+		store.nriLastActivity[podUID] = time.Time{}
 	}
 	return store, nil
 }
@@ -166,6 +173,12 @@ func (s *SecondaryNICPodConfigStore) Set(podUID types.UID, device string, cfg Se
 		s.store[podUID] = make(map[string]SecondaryNICPodConfig)
 	}
 	s.store[podUID][device] = cfg
+	if s.nriLastActivity == nil {
+		s.nriLastActivity = make(map[types.UID]time.Time)
+	}
+	if _, found := s.nriLastActivity[podUID]; !found {
+		s.nriLastActivity[podUID] = time.Time{}
+	}
 	return nil
 }
 
@@ -184,6 +197,33 @@ func (s *SecondaryNICPodConfigStore) Get(podUID types.UID) (map[string]Secondary
 		configsCopy[k] = v
 	}
 	return configsCopy, true
+}
+
+// UpdateLastNRIActivity records when an NRI hook last processed this prepared
+// pod. Activity is process-local and intentionally not checkpointed.
+func (s *SecondaryNICPodConfigStore) UpdateLastNRIActivity(podUID types.UID, timestamp time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, found := s.store[podUID]; !found {
+		return
+	}
+	if s.nriLastActivity == nil {
+		s.nriLastActivity = make(map[types.UID]time.Time)
+	}
+	s.nriLastActivity[podUID] = timestamp
+}
+
+// GetPodNRIActivities returns one activity timestamp for every prepared pod.
+// A zero timestamp means no secondary-NIC NRI callback has been observed in
+// this process.
+func (s *SecondaryNICPodConfigStore) GetPodNRIActivities() map[types.UID]time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	activities := make(map[types.UID]time.Time, len(s.store))
+	for podUID := range s.store {
+		activities[podUID] = s.nriLastActivity[podUID]
+	}
+	return activities
 }
 
 // HasSharedPodForMAC reports whether any stored pod uses the physical NIC as a
@@ -226,6 +266,7 @@ func (s *SecondaryNICPodConfigStore) Delete(podUID types.UID) error {
 		}
 	}
 	delete(s.store, podUID)
+	delete(s.nriLastActivity, podUID)
 	return nil
 }
 
@@ -254,6 +295,7 @@ func (s *SecondaryNICPodConfigStore) DeleteByClaim(claimKey types.NamespacedName
 	}
 	for _, uid := range podUIDs {
 		delete(s.store, uid)
+		delete(s.nriLastActivity, uid)
 	}
 	return nil
 }

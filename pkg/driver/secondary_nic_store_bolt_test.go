@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	bolt "go.etcd.io/bbolt"
@@ -77,6 +78,7 @@ func TestSecondaryNICPodConfigStore_Persistence(t *testing.T) {
 	if err := store1.Set("pod-2", "device-2", exclusiveConfig, claim); err != nil {
 		t.Fatalf("Set(exclusive) error: %v", err)
 	}
+	store1.UpdateLastNRIActivity("pod-1", time.Unix(123, 0))
 	if err := store1.Close(); err != nil {
 		t.Fatalf("Close() error: %v", err)
 	}
@@ -111,6 +113,10 @@ func TestSecondaryNICPodConfigStore_Persistence(t *testing.T) {
 	}
 	if diff := cmp.Diff(exclusiveConfig, pod2Configs["device-2"]); diff != "" {
 		t.Fatalf("restored exclusive config mismatch (-want +got):\n%s", diff)
+	}
+	activities := store2.GetPodNRIActivities()
+	if got, found := activities["pod-1"]; !found || !got.IsZero() {
+		t.Fatalf("restored pod activity = (%v, %t), want (zero, true)", got, found)
 	}
 }
 

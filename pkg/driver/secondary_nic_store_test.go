@@ -18,6 +18,7 @@ package driver
 
 import (
 	"testing"
+	"time"
 
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/dranet/pkg/apis"
@@ -68,6 +69,43 @@ func TestSecondaryNICPodConfigStore_SetAndGet(t *testing.T) {
 	}
 	if gotCfg.NIC.PodIP != "10.0.1.10" {
 		t.Errorf("expected PodIP 10.0.1.10, got %s", gotCfg.NIC.PodIP)
+	}
+}
+
+func TestSecondaryNICPodConfigStore_NRIActivityLifecycle(t *testing.T) {
+	store := NewSecondaryNICPodConfigStore()
+	podUID := types.UID("pod-a")
+	claim := types.NamespacedName{Namespace: "ns", Name: "claim-a"}
+	if err := store.Set(podUID, "eth1", SecondaryNICPodConfig{}, claim); err != nil {
+		t.Fatal(err)
+	}
+
+	activities := store.GetPodNRIActivities()
+	activity, found := activities[podUID]
+	if !found || !activity.IsZero() {
+		t.Fatalf("new pod activity = (%v, %t), want (zero, true)", activity, found)
+	}
+
+	want := time.Unix(123, 0)
+	store.UpdateLastNRIActivity(podUID, want)
+	if got := store.GetPodNRIActivities()[podUID]; !got.Equal(want) {
+		t.Fatalf("updated activity = %v, want %v", got, want)
+	}
+
+	// An idempotent prepare must not make a pod with completed NRI activity
+	// appear unprocessed again.
+	if err := store.Set(podUID, "eth1", SecondaryNICPodConfig{}, claim); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.GetPodNRIActivities()[podUID]; !got.Equal(want) {
+		t.Fatalf("activity after repeated Set = %v, want %v", got, want)
+	}
+
+	if err := store.Delete(podUID); err != nil {
+		t.Fatal(err)
+	}
+	if _, found := store.GetPodNRIActivities()[podUID]; found {
+		t.Fatal("activity remained after pod deletion")
 	}
 }
 
@@ -277,6 +315,16 @@ func TestSecondaryNICPodConfigStore_DeleteByClaim(t *testing.T) {
 	_, foundB := store.Get(podB)
 	if foundA || foundB {
 		t.Error("expected both pods removed from store after DeleteByClaim")
+	}
+	activities := store.GetPodNRIActivities()
+	if _, found := activities[podA]; found {
+		t.Error("DeleteByClaim retained pod A activity")
+	}
+	if _, found := activities[podB]; found {
+		t.Error("DeleteByClaim retained pod B activity")
+	}
+	if _, found := activities[podC]; !found {
+		t.Error("DeleteByClaim removed unrelated pod activity")
 	}
 	if _, found := store.Get(podC); !found {
 		t.Error("DeleteByClaim removed a pod belonging to another claim")

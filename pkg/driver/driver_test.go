@@ -216,3 +216,43 @@ func TestStop(t *testing.T) {
 		t.Errorf("nriPlugin.Stop() was not called")
 	}
 }
+
+func TestStopWaitsForSecondaryNICPod(t *testing.T) {
+	fakeClock := testingclock.NewFakeClock(time.Now())
+	fakeDra := newFakePluginHelper()
+	fakeNri := &fakeNriStub{}
+	secondaryStore := NewSecondaryNICPodConfigStore()
+	if err := secondaryStore.Set("secondary-pod", "eth1", SecondaryNICPodConfig{}, types.NamespacedName{Namespace: "ns", Name: "claim"}); err != nil {
+		t.Fatal(err)
+	}
+
+	np := &NetworkDriver{
+		draPlugin:         fakeDra,
+		nriPlugin:         fakeNri,
+		podConfigStore:    mustNewPodConfigStore(),
+		secondaryNICStore: secondaryStore,
+		clock:             fakeClock,
+	}
+
+	stopDone := make(chan struct{})
+	go func() {
+		np.Stop(func() {})
+		close(stopDone)
+	}()
+
+	select {
+	case <-stopDone:
+		t.Fatal("Stop() returned before the secondary-only pod grace period")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	fakeClock.Step(10 * time.Second)
+	select {
+	case <-stopDone:
+	case <-time.After(time.Second):
+		t.Fatal("Stop() did not finish after the secondary-only pod grace period")
+	}
+	if !fakeNri.stopCalled {
+		t.Fatal("nriPlugin.Stop() was not called")
+	}
+}
