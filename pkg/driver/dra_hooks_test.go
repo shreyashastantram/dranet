@@ -18,14 +18,13 @@ package driver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
-	"testing"
-
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -1057,6 +1056,28 @@ func TestBuildCNSDevicesPublishesAllCapacities(t *testing.T) {
 			}
 			if len(devices[0].Taints) != 0 {
 				t.Fatalf("positive capacity taints = %+v, want none", devices[0].Taints)
+			}
+		})
+	}
+}
+
+func TestIsCNSNotReadyErr(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{name: "nil error"},
+		{name: "unrelated error", err: errors.New("device not found")},
+		{name: "claim resource info failure", err: errors.New("failed to get CNS claim resource info for claim claim-uid: CNS returned HTTP 400"), expected: true},
+		{name: "MTPNC not ready", err: errors.New("mtpnc is not ready"), expected: true},
+		{name: "network not ready", err: errors.New("network is not ready"), expected: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isCNSNotReadyErr(test.err); got != test.expected {
+				t.Errorf("isCNSNotReadyErr() = %v, want %v", got, test.expected)
 			}
 		})
 	}

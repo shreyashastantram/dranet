@@ -73,24 +73,23 @@ const (
 	cnsPrepareRetryInterval = 500 * time.Millisecond
 
 	// cnsPrepareRetryTimeout is the maximum wall-clock time prepareCNSResourceClaim
-	// will spend retrying transient "MTPNC not ready" errors inside a single
+	// will spend retrying transient CNS readiness errors inside a single
 	// NodePrepareResources call. Kept well below kubelet's gRPC plugin timeout
 	// so we never get cancelled mid-retry. Tuned for the common case where
 	// MTPNC settles within ~1-3s after pod scheduling; if it takes longer we
-	// fall back to kubelet's pod sync retry (SyncFrequency, ~60-90s).
+	// fall back to kubelet's pod sync retry.
 	cnsPrepareRetryTimeout = 10 * time.Second
 )
 
 // isCNSNotReadyErr returns true when err indicates the per-pod CNS state
-// (MTPNC / pod IP config) has not yet been provisioned. This is the common
-// startup race where kubelet calls NodePrepareResources before CNS has
-// finished reconciling the MultitenantPodNetworkConfig CRD.
+// (claim resource info, MTPNC, or pod IP config) may not yet be available.
 func isCNSNotReadyErr(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := err.Error()
-	return strings.Contains(msg, "mtpnc is not ready") ||
+	return strings.Contains(msg, "failed to get CNS claim resource info for claim") ||
+		strings.Contains(msg, "mtpnc is not ready") ||
 		strings.Contains(msg, "network is not ready")
 }
 
@@ -641,9 +640,9 @@ func (np *NetworkDriver) prepareCNSResourceClaim(ctx context.Context, claim *res
 				pod.Namespace, pod.Name, pod.UID, deviceName, shareID)
 			claimKey := types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}
 
-			// Retry locally on transient "MTPNC not ready" errors so the pod can
+			// Retry locally on transient CNS readiness errors so the pod can
 			// start immediately once CNS finishes reconciling, instead of waiting
-			// 60-90s for kubelet's next pod sync. Bounded by cnsPrepareRetryTimeout.
+			// for kubelet's next pod sync. Bounded by cnsPrepareRetryTimeout.
 			var lastErr error
 			deadline := time.Now().Add(cnsPrepareRetryTimeout)
 		retryLoop:
